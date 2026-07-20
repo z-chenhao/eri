@@ -16,6 +16,7 @@ import (
 
 type SchedulerService interface {
 	Create(context.Context, string, scheduler.CreateRequest) (scheduler.Commitment, error)
+	Update(context.Context, string, string, scheduler.CreateRequest) (scheduler.Commitment, error)
 	List(context.Context, int) ([]scheduler.Commitment, error)
 	SetStatus(context.Context, string, string) error
 }
@@ -43,12 +44,12 @@ func NewScheduler(service SchedulerService) (*Scheduler, error) {
 
 func (s *Scheduler) Descriptor() tool.Descriptor {
 	return tool.Descriptor{
-		ID: "builtin.commitments", Version: "0.2.0",
-		Purpose: "Create, inspect, pause, resume or cancel durable reminders and recurring commitments. A due commitment wakes the same Eri Agent Loop; do not create one unless the user has agreed to the ongoing work. Use origin_channel when the user explicitly asks in the current conversation for a reminder. Use recent_channel for ongoing proactive work first proposed by Eri and then accepted by the user, so each future delivery follows the user's latest trusted conversation channel.",
+		ID: "builtin.commitments", Version: "0.3.0",
+		Purpose: "Create, update, inspect, pause, resume or cancel durable reminders and recurring commitments. A due commitment wakes the same Eri Agent Loop; do not create one unless the user has agreed to the ongoing work. When the user refines or corrects a commitment just created, update that commitment_id instead of creating an overlapping commitment. Use origin_channel when the user explicitly asks in the current conversation for a reminder. Use recent_channel for ongoing proactive work first proposed by Eri and then accepted by the user, so each future delivery follows the user's latest trusted conversation channel.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"operation":     map[string]any{"type": "string", "enum": []string{"create", "list", "pause", "resume", "cancel"}},
+				"operation":     map[string]any{"type": "string", "enum": []string{"create", "update", "list", "pause", "resume", "cancel"}},
 				"commitment_id": map[string]any{"type": "string"}, "message": map[string]any{"type": "string"},
 				"importance": map[string]any{"type": "string", "enum": []string{"normal", "important"}},
 				"delivery_route": map[string]any{
@@ -87,10 +88,19 @@ func (s *Scheduler) Prepare(_ context.Context, raw json.RawMessage) (tool.Prepar
 	action := policy.Action{Target: "commitments", Effect: policy.ReadOnly}
 	switch input.Operation {
 	case "list":
-	case "create":
+	case "create", "update":
 		action.Effect = policy.Reversible
 		if input.Message == "" || input.Schedule.Type == "" {
 			return tool.Prepared{}, fmt.Errorf("message and schedule are required")
+		}
+		if input.Operation == "update" {
+			action.Target = "commitment:" + input.CommitmentID
+			if input.CommitmentID == "" {
+				return tool.Prepared{}, fmt.Errorf("commitment_id is required")
+			}
+			if input.Importance == "" || input.DeliveryRoute == "" {
+				return tool.Prepared{}, fmt.Errorf("importance and delivery_route are required for update")
+			}
 		}
 	case "pause", "resume", "cancel":
 		action.Effect = policy.Reversible
@@ -118,6 +128,10 @@ func (s *Scheduler) Execute(ctx context.Context, prepared tool.Prepared) (tool.R
 	switch input.Operation {
 	case "create":
 		output, err = s.service.Create(ctx, prepared.TaskID, scheduler.CreateRequest{
+			Message: input.Message, Schedule: input.Schedule, Importance: input.Importance, DeliveryRoute: input.DeliveryRoute,
+		})
+	case "update":
+		output, err = s.service.Update(ctx, prepared.TaskID, input.CommitmentID, scheduler.CreateRequest{
 			Message: input.Message, Schedule: input.Schedule, Importance: input.Importance, DeliveryRoute: input.DeliveryRoute,
 		})
 	case "list":

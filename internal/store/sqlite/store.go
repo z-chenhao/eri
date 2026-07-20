@@ -746,7 +746,7 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 		})
 	}
 	rows, err := tx.QueryContext(ctx, `
-		SELECT sequence, id, kind, role, content_ref_json FROM interactions
+		SELECT sequence, id, kind, channel, role, content_ref_json FROM interactions
 		WHERE conversation_id = ? AND sequence >= ?
 			AND (kind != 'internal_trigger' OR id = (SELECT source_interaction_id FROM tasks WHERE id = ?))
 		ORDER BY sequence DESC`, channel.ConversationID, firstSequence, taskID)
@@ -756,7 +756,7 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 	for rows.Next() {
 		var record agent.ContextRecord
 		var encodedRef string
-		if err := rows.Scan(&record.Sequence, &record.ID, &record.Kind, &record.Role, &encodedRef); err != nil {
+		if err := rows.Scan(&record.Sequence, &record.ID, &record.Kind, &record.Channel, &record.Role, &encodedRef); err != nil {
 			rows.Close()
 			return agent.TaskContext{}, false, err
 		}
@@ -821,7 +821,7 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 
 func (s *Store) LoadTaskInputsAfter(ctx context.Context, taskID string, afterSequence int64) ([]agent.ContextRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT sequence, id, kind, role, content_ref_json
+		SELECT sequence, id, kind, channel, role, content_ref_json
 		FROM interactions
 		WHERE task_id = ? AND direction = 'inbound' AND sequence > ?
 		ORDER BY sequence`, taskID, afterSequence)
@@ -832,7 +832,7 @@ func (s *Store) LoadTaskInputsAfter(ctx context.Context, taskID string, afterSeq
 	for rows.Next() {
 		var record agent.ContextRecord
 		var encodedRef string
-		if err := rows.Scan(&record.Sequence, &record.ID, &record.Kind, &record.Role, &encodedRef); err != nil {
+		if err := rows.Scan(&record.Sequence, &record.ID, &record.Kind, &record.Channel, &record.Role, &encodedRef); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(encodedRef), &record.ContentRef); err != nil {
@@ -1554,32 +1554,37 @@ func (s *Store) LoadDelivery(ctx context.Context, id string) (delivery.Record, b
 		return delivery.Record{}, false, err
 	}
 	if record.TargetChannel == "lark" {
-		err = s.db.QueryRowContext(ctx, `
-			SELECT cm.external_conversation_id, cm.external_message_id
-			FROM channel_messages cm JOIN interactions i ON i.id = cm.interaction_id
-			WHERE cm.channel = ? AND cm.direction = 'inbound' AND i.task_id = ?
-			ORDER BY i.sequence DESC LIMIT 1`, record.TargetChannel, record.TaskID).
-			Scan(&record.ExternalTarget.ConversationID, &record.ExternalTarget.ReplyToMessageID)
-		if errors.Is(err, sql.ErrNoRows) {
-			err = s.db.QueryRowContext(ctx, `
-				SELECT target_conversation_id, reply_to_message_id
-				FROM commitment_fires WHERE task_id = ?`, record.TaskID).
-				Scan(&record.ExternalTarget.ConversationID, &record.ExternalTarget.ReplyToMessageID)
-			if err == nil {
-				if record.ExternalTarget.ConversationID == "" {
-					return delivery.Record{}, false, fmt.Errorf("delivery %s has no durable %s target", record.ID, record.TargetChannel)
-				}
-				return record, true, nil
-			}
-			if errors.Is(err, sql.ErrNoRows) {
-				return delivery.Record{}, false, fmt.Errorf("delivery %s has no durable %s target", record.ID, record.TargetChannel)
-			}
-		}
+		record.ExternalTarget, err = deliveryExternalTarget(ctx, s.db, record.TargetChannel, record.TaskID)
 		if err != nil {
-			return delivery.Record{}, false, err
+			return delivery.Record{}, false, fmt.Errorf("delivery %s has no durable %s target: %w", record.ID, record.TargetChannel, err)
 		}
 	}
 	return record, true, nil
+}
+
+func deliveryExternalTarget(ctx context.Context, queryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, targetChannel, taskID string) (channel.ExternalTarget, error) {
+	var target channel.ExternalTarget
+	err := queryer.QueryRowContext(ctx, `
+		SELECT cm.external_conversation_id, cm.external_message_id
+		FROM channel_messages cm JOIN interactions i ON i.id = cm.interaction_id
+		WHERE cm.channel = ? AND cm.direction = 'inbound' AND i.task_id = ?
+		ORDER BY i.sequence DESC LIMIT 1`, targetChannel, taskID).
+		Scan(&target.ConversationID, &target.ReplyToMessageID)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = queryer.QueryRowContext(ctx, `
+			SELECT target_conversation_id, reply_to_message_id
+			FROM commitment_fires WHERE task_id = ? AND target_channel = ?`, taskID, targetChannel).
+			Scan(&target.ConversationID, &target.ReplyToMessageID)
+	}
+	if err != nil {
+		return channel.ExternalTarget{}, err
+	}
+	if strings.TrimSpace(target.ConversationID) == "" {
+		return channel.ExternalTarget{}, fmt.Errorf("empty external conversation id")
+	}
+	return target, nil
 }
 
 func (s *Store) CommitConversationDelivery(ctx context.Context, deliveryID, interactionID string, receipt delivery.Receipt, now time.Time) error {
@@ -1618,14 +1623,9 @@ func (s *Store) CommitConversationDelivery(ctx context.Context, deliveryID, inte
 		return err
 	}
 	if receipt.ExternalMessageID != "" {
-		var target channel.ExternalTarget
-		if err := tx.QueryRowContext(ctx, `
-			SELECT cm.external_conversation_id, cm.external_message_id
-			FROM channel_messages cm JOIN interactions i ON i.id = cm.interaction_id
-			WHERE cm.channel = ? AND cm.direction = 'inbound' AND i.task_id = ?
-			ORDER BY i.sequence DESC LIMIT 1`, record.TargetChannel, record.TaskID).
-			Scan(&target.ConversationID, &target.ReplyToMessageID); err != nil {
-			return err
+		target, err := deliveryExternalTarget(ctx, tx, record.TargetChannel, record.TaskID)
+		if err != nil {
+			return fmt.Errorf("resolve delivery %s external target: %w", deliveryID, err)
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO channel_messages(

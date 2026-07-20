@@ -72,6 +72,46 @@ func TestBuildMessagesSendsImagesOnlyToVisionCapableProvider(t *testing.T) {
 	}
 }
 
+func TestBuildMessagesPresentsInternalTriggerAsCurrentTask(t *testing.T) {
+	contentStore, err := content.New(t.TempDir(), []byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	oldRef, err := contentStore.Put(ctx, []byte("I am going to sleep."), content.Metadata{MediaType: "text/plain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	triggerRef, err := contentStore.Put(ctx, []byte("Check the monitored sources for material changes."), content.Metadata{MediaType: "text/plain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{content: contentStore}
+	messages, err := service.buildContextMessages(ctx, []ContextRecord{
+		{ID: "old-user", Kind: "text", Role: "user", ContentRef: oldRef},
+		{ID: "scheduled-trigger", Kind: "internal_trigger", Channel: "scheduler", Role: "system", ContentRef: triggerRef},
+	}, ModelCapabilities{ContextTokens: 32_768})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := messages[len(messages)-1]
+	if current.Role != "user" || !strings.Contains(current.Content, "not a user-authored message") || !strings.Contains(current.Content, "Check the monitored sources") {
+		t.Fatalf("current task message = %+v", current)
+	}
+	if got := latestTaskContent(messages); !strings.Contains(got, "Check the monitored sources") {
+		t.Fatalf("latest task content = %q", got)
+	}
+	introduction, err := service.buildContextMessages(ctx, []ContextRecord{{
+		ID: "introduction-trigger", Kind: "internal_trigger", Channel: "introduction", Role: "system", ContentRef: triggerRef,
+	}}, ModelCapabilities{ContextTokens: 32_768})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if introduction[0].Role != "system" || strings.Contains(introduction[0].Content, "not a user-authored message") {
+		t.Fatalf("non-scheduler trigger changed semantics: %+v", introduction[0])
+	}
+}
+
 type contextTestRepository struct{ checkpoint ContextCheckpoint }
 
 func (r *contextTestRepository) SaveContextCheckpoint(_ context.Context, _, _ string, checkpoint ContextCheckpoint) error {

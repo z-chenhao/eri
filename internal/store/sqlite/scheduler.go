@@ -128,6 +128,91 @@ func (s *Store) CreateCommitment(ctx context.Context, commitment scheduler.Commi
 	return tx.Commit()
 }
 
+func (s *Store) UpdateCommitment(ctx context.Context, replacement scheduler.Commitment) (scheduler.Commitment, error) {
+	messageRef, err := json.Marshal(replacement.MessageRef)
+	if err != nil {
+		return scheduler.Commitment{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return scheduler.Commitment{}, err
+	}
+	defer tx.Rollback()
+	var current scheduler.Commitment
+	var currentMessageRef, currentSchedule, lastRun, createdAt string
+	err = tx.QueryRowContext(ctx, `
+		SELECT message_ref_json, schedule_json, importance, status, COALESCE(last_run_at, ''),
+			version, created_at
+		FROM commitments WHERE id = ?`, replacement.ID).
+		Scan(&currentMessageRef, &currentSchedule, &current.Importance, &current.Status, &lastRun, &current.Version, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return scheduler.Commitment{}, fmt.Errorf("commitment not found")
+	}
+	if err != nil {
+		return scheduler.Commitment{}, err
+	}
+	if current.Status == "completed" || current.Status == "canceled" {
+		return scheduler.Commitment{}, fmt.Errorf("terminal commitment cannot be updated")
+	}
+	if err := json.Unmarshal([]byte(currentMessageRef), &current.MessageRef); err != nil {
+		return scheduler.Commitment{}, err
+	}
+	current.Schedule, current.Target, err = decodeCommitmentSchedule(currentSchedule)
+	if err != nil {
+		return scheduler.Commitment{}, err
+	}
+	// Updating the objective or cadence must not silently move an
+	// origin_channel commitment to whichever channel supplied the clarification.
+	// Preserve the trusted external target and change only the model-selectable
+	// routing intent.
+	replacement.Target.Channel = current.Target.Channel
+	replacement.Target.ConversationID = current.Target.ConversationID
+	replacement.Target.ReplyToMessageID = current.Target.ReplyToMessageID
+	scheduleJSON, err := encodeCommitmentSchedule(replacement)
+	if err != nil {
+		return scheduler.Commitment{}, err
+	}
+	current.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return scheduler.Commitment{}, err
+	}
+	if lastRun != "" {
+		current.LastRunAt, err = parseTime(lastRun)
+		if err != nil {
+			return scheduler.Commitment{}, err
+		}
+	}
+	if err := insertContentRef(ctx, tx, replacement.MessageRef, replacement.UpdatedAt); err != nil {
+		return scheduler.Commitment{}, err
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE commitments SET message_ref_json = ?, schedule_json = ?, importance = ?, next_run_at = ?,
+			version = version + 1, updated_at = ?
+		WHERE id = ? AND version = ?`, string(messageRef), string(scheduleJSON), replacement.Importance,
+		formatTime(replacement.NextRunAt), formatTime(replacement.UpdatedAt), replacement.ID, current.Version)
+	if err != nil {
+		return scheduler.Commitment{}, err
+	}
+	if count, err := result.RowsAffected(); err != nil || count != 1 {
+		return scheduler.Commitment{}, fmt.Errorf("commitment changed concurrently")
+	}
+	if err := appendEvent(ctx, tx, "commitment", replacement.ID, "commitment.updated", map[string]any{
+		"previous_version": current.Version, "schedule_type": replacement.Schedule.Type,
+		"next_run_at": formatTime(replacement.NextRunAt), "importance": replacement.Importance,
+		"routing_mode": replacement.Target.RoutingMode, "target_channel": replacement.Target.Channel,
+	}, replacement.UpdatedAt); err != nil {
+		return scheduler.Commitment{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return scheduler.Commitment{}, err
+	}
+	replacement.Status = current.Status
+	replacement.Version = current.Version + 1
+	replacement.CreatedAt = current.CreatedAt
+	replacement.LastRunAt = current.LastRunAt
+	return replacement, nil
+}
+
 func (s *Store) ListCommitments(ctx context.Context, limit int) ([]scheduler.Commitment, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, message_ref_json, schedule_json, importance, status, COALESCE(next_run_at, ''),

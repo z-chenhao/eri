@@ -26,6 +26,7 @@ import (
 type ContextRecord struct {
 	ID          string
 	Kind        string
+	Channel     string
 	Sequence    int64
 	Role        string
 	ContentRef  content.Ref

@@ -63,6 +63,7 @@ type Commitment struct {
 type Repository interface {
 	CommitmentDeliveryTarget(context.Context, string) (DeliveryTarget, error)
 	CreateCommitment(context.Context, Commitment) error
+	UpdateCommitment(context.Context, Commitment) (Commitment, error)
 	ListCommitments(context.Context, int) ([]Commitment, error)
 	SetCommitmentStatus(context.Context, string, string) error
 	TriggerDueCommitments(context.Context, time.Time, int) (int, error)
@@ -84,48 +85,24 @@ func NewService(repository Repository, contentStore ContentStore) *Service {
 }
 
 func (s *Service) Create(ctx context.Context, sourceTaskID string, request CreateRequest) (Commitment, error) {
-	sourceTaskID = strings.TrimSpace(sourceTaskID)
-	if sourceTaskID == "" {
-		return Commitment{}, fmt.Errorf("commitment source task id is required")
-	}
-	request.Message = strings.TrimSpace(request.Message)
-	if request.Message == "" || len([]byte(request.Message)) > 64*1024 {
-		return Commitment{}, fmt.Errorf("commitment message must be between 1 byte and 64 KiB")
-	}
-	if request.Importance == "" {
-		request.Importance = "normal"
-	}
-	if request.Importance != "normal" && request.Importance != "important" {
-		return Commitment{}, fmt.Errorf("importance must be normal or important")
-	}
-	if request.DeliveryRoute == "" {
-		request.DeliveryRoute = DeliveryRouteOrigin
-	}
-	if request.DeliveryRoute != DeliveryRouteOrigin && request.DeliveryRoute != DeliveryRouteRecent {
-		return Commitment{}, fmt.Errorf("delivery_route must be origin_channel or recent_channel")
+	request, err := normalizeRequest(sourceTaskID, request)
+	if err != nil {
+		return Commitment{}, err
 	}
 	now := s.now().UTC()
 	next, err := FirstRun(request.Schedule, now)
 	if err != nil {
 		return Commitment{}, err
 	}
-	target, err := s.repository.CommitmentDeliveryTarget(ctx, sourceTaskID)
+	target, err := s.deliveryTarget(ctx, sourceTaskID, request.DeliveryRoute)
 	if err != nil {
-		return Commitment{}, fmt.Errorf("resolve commitment delivery target: %w", err)
+		return Commitment{}, err
 	}
-	target.RoutingMode = request.DeliveryRoute
 	id, err := identifier.New()
 	if err != nil {
 		return Commitment{}, err
 	}
-	prompt := "A durable commitment is due. Deliver this reminder or recurring task in the canonical conversation: " + request.Message
-	if request.Importance == "important" {
-		prompt += " Call the local notification tool once so the user can find this time-sensitive message even when the web page is closed."
-	}
-	ref, err := s.content.Put(ctx, []byte(prompt), content.Metadata{
-		MediaType: "text/plain; charset=utf-8", EncryptionDomain: "commitment", PrivacyClass: "private",
-		RetentionPolicy: "until_commitment_deleted", ProvenanceRef: id,
-	})
+	ref, err := s.storePrompt(ctx, id, request)
 	if err != nil {
 		return Commitment{}, err
 	}
@@ -139,6 +116,85 @@ func (s *Service) Create(ctx context.Context, sourceTaskID string, request Creat
 		return Commitment{}, err
 	}
 	return commitment, nil
+}
+
+func (s *Service) Update(ctx context.Context, sourceTaskID, id string, request CreateRequest) (Commitment, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Commitment{}, fmt.Errorf("commitment id is required")
+	}
+	if request.Importance == "" || request.DeliveryRoute == "" {
+		return Commitment{}, fmt.Errorf("commitment update requires importance and delivery_route")
+	}
+	request, err := normalizeRequest(sourceTaskID, request)
+	if err != nil {
+		return Commitment{}, err
+	}
+	now := s.now().UTC()
+	next, err := FirstRun(request.Schedule, now)
+	if err != nil {
+		return Commitment{}, err
+	}
+	ref, err := s.storePrompt(ctx, id, request)
+	if err != nil {
+		return Commitment{}, err
+	}
+	updated, err := s.repository.UpdateCommitment(ctx, Commitment{
+		ID: id, MessageRef: ref, Schedule: request.Schedule, Importance: request.Importance,
+		Target: DeliveryTarget{RoutingMode: request.DeliveryRoute}, NextRunAt: next, UpdatedAt: now,
+	})
+	if err != nil {
+		_ = s.content.Delete(context.Background(), ref)
+		return Commitment{}, err
+	}
+	return updated, nil
+}
+
+func normalizeRequest(sourceTaskID string, request CreateRequest) (CreateRequest, error) {
+	sourceTaskID = strings.TrimSpace(sourceTaskID)
+	if sourceTaskID == "" {
+		return CreateRequest{}, fmt.Errorf("commitment source task id is required")
+	}
+	request.Message = strings.TrimSpace(request.Message)
+	if request.Message == "" || len([]byte(request.Message)) > 64*1024 {
+		return CreateRequest{}, fmt.Errorf("commitment message must be between 1 byte and 64 KiB")
+	}
+	if request.Importance == "" {
+		request.Importance = "normal"
+	}
+	if request.Importance != "normal" && request.Importance != "important" {
+		return CreateRequest{}, fmt.Errorf("importance must be normal or important")
+	}
+	if request.DeliveryRoute == "" {
+		request.DeliveryRoute = DeliveryRouteOrigin
+	}
+	if request.DeliveryRoute != DeliveryRouteOrigin && request.DeliveryRoute != DeliveryRouteRecent {
+		return CreateRequest{}, fmt.Errorf("delivery_route must be origin_channel or recent_channel")
+	}
+	return request, nil
+}
+
+func (s *Service) deliveryTarget(ctx context.Context, sourceTaskID, deliveryRoute string) (DeliveryTarget, error) {
+	target, err := s.repository.CommitmentDeliveryTarget(ctx, sourceTaskID)
+	if err != nil {
+		return DeliveryTarget{}, fmt.Errorf("resolve commitment delivery target: %w", err)
+	}
+	target.RoutingMode = deliveryRoute
+	return target, nil
+}
+
+func (s *Service) storePrompt(ctx context.Context, id string, request CreateRequest) (content.Ref, error) {
+	prompt := "A durable commitment is due. Deliver this reminder or recurring task in the canonical conversation: " + request.Message
+	if request.Schedule.Type != "once" {
+		prompt += " Treat this Runtime trigger, not an unrelated earlier conversation message, as the current objective. Report only claims supported by this run."
+	}
+	if request.Importance == "important" {
+		prompt += " Call the local notification tool once so the user can find this time-sensitive message even when the web page is closed."
+	}
+	return s.content.Put(ctx, []byte(prompt), content.Metadata{
+		MediaType: "text/plain; charset=utf-8", EncryptionDomain: "commitment", PrivacyClass: "private",
+		RetentionPolicy: "until_commitment_deleted", ProvenanceRef: id,
+	})
 }
 
 func (s *Service) List(ctx context.Context, limit int) ([]Commitment, error) {

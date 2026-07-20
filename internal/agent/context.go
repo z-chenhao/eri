@@ -280,6 +280,16 @@ func (s *Service) buildContextMessages(ctx context.Context, records []ContextRec
 			return nil, fmt.Errorf("read context interaction %s: %w", record.ID, err)
 		}
 		var assembled strings.Builder
+		role := record.Role
+		if record.Kind == "internal_trigger" && record.Channel == "scheduler" {
+			// Providers commonly treat a system message in the middle of a long
+			// transcript as historical context. Keep the durable interaction's
+			// system provenance in storage, but present the current Runtime task as
+			// the final instruction turn so an unrelated earlier user message cannot
+			// become the apparent objective.
+			role = "user"
+			assembled.WriteString("[Runtime task trigger; this is not a user-authored message.]\n")
+		}
 		assembled.Write(body)
 		remainingAttachmentBytes := 512 * 1024
 		if contextualLimit := capabilities.ContextTokens * 2; contextualLimit > 0 && contextualLimit < remainingAttachmentBytes {
@@ -323,7 +333,7 @@ func (s *Service) buildContextMessages(ctx context.Context, records []ContextRec
 			}
 			assembled.WriteString("\n[END USER ATTACHMENT]")
 		}
-		messages = append(messages, Message{Role: record.Role, Content: assembled.String(), Images: images})
+		messages = append(messages, Message{Role: role, Content: assembled.String(), Images: images})
 	}
 	return messages, nil
 }
