@@ -82,6 +82,39 @@ func TestClientUsesThinkingForToolFreeJudgment(t *testing.T) {
 	}
 }
 
+func TestClientDisablesThinkingForToolHistoryWithoutCurrentTools(t *testing.T) {
+	t.Parallel()
+	var observed chatRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&observed); err != nil {
+			t.Fatal(err)
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]any{"role": "assistant", "content": `{"result":"pass"}`}}},
+			"usage":   map[string]any{"prompt_tokens": 24, "completion_tokens": 4},
+		})
+	}))
+	defer server.Close()
+	client, _ := New(server.URL, "test-secret", "deepseek-v4-flash", time.Second)
+	_, err := client.Complete(context.Background(), agent.ModelRequest{
+		System: "return JSON",
+		Messages: []agent.Message{
+			{Role: "user", Content: "look it up"},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1", Name: "lookup", Arguments: json.RawMessage(`{}`)}}},
+			{Role: "tool", ToolCallID: "call-1", Content: `{"found":true}`},
+			{Role: "assistant", Content: "I found a reliable source and am checking one more detail."},
+			{Role: "user", Content: "evaluate the progress candidate"},
+		},
+		JSONOutput: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.Thinking["type"] != "disabled" || observed.ReasoningEffort != "" || observed.ToolChoice != "" || observed.Temperature != nil {
+		t.Fatalf("historical tool request = %+v", observed)
+	}
+}
+
 func TestClientRecoversTransientProviderFailure(t *testing.T) {
 	t.Parallel()
 	attempts := 0

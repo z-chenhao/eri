@@ -181,12 +181,28 @@ func (c *Client) Complete(ctx context.Context, input agent.ModelRequest) (agent.
 	if input.JSONOutput {
 		requestBody.ResponseFormat = &responseFormat{Type: "json_object"}
 	}
+	// Eri deliberately does not retain private reasoning_content. DeepSeek
+	// requires that field to be replayed when thinking mode sees any earlier
+	// Tool Call, so disable thinking for both current and historical Tool
+	// protocol frames. A tool-free Judge may still evaluate that governed
+	// history in non-thinking mode without weakening the transcript.
+	hasToolProtocol := len(tools) > 0
+	if !hasToolProtocol {
+		for _, message := range input.Messages {
+			if len(message.ToolCalls) > 0 || message.Role == "tool" || message.ToolCallID != "" {
+				hasToolProtocol = true
+				break
+			}
+		}
+	}
+	if hasToolProtocol {
+		requestBody.Thinking = map[string]any{"type": "disabled"}
+	}
 	if len(tools) > 0 {
 		temperature := 0.2
-		requestBody.Thinking = map[string]any{"type": "disabled"}
 		requestBody.Temperature = &temperature
 		requestBody.ToolChoice = "auto"
-	} else {
+	} else if !hasToolProtocol {
 		// DeepSeek thinking is useful for evaluation, compaction and structured
 		// synthesis calls that have no Tool protocol to recover. Tool-bearing
 		// turns stay non-thinking because the provider requires private
