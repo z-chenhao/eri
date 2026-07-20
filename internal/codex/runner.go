@@ -129,18 +129,17 @@ func (r *LocalRunner) Run(ctx context.Context, request RunRequest, onStarted fun
 	}
 	output := make(chan streamResult, 1)
 	go func() { output <- decodeEventStream(io.LimitReader(stdout, resultLimit+1)) }()
-	wait := make(chan error, 1)
-	go func() { wait <- command.Wait() }()
 	deadline := time.NewTimer(r.timeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(r.poll)
 	defer ticker.Stop()
-	var processErr error
-	var stream streamResult
-	processDone := false
-	streamDone := false
 	for {
-		if processDone && streamDone {
+		select {
+		case stream := <-output:
+			// StdoutPipe requires all reads to finish before Wait closes the
+			// descriptor. Waiting in parallel can truncate a fast process's last
+			// JSONL event on Linux, especially under the race detector.
+			processErr := command.Wait()
 			if processErr != nil {
 				return Result{}, processErr
 			}
@@ -148,31 +147,19 @@ func (r *LocalRunner) Run(ctx context.Context, request RunRequest, onStarted fun
 				return Result{}, stream.err
 			}
 			return stream.result, nil
-		}
-		select {
-		case processErr = <-wait:
-			processDone = true
-		case stream = <-output:
-			streamDone = true
 		case <-ctx.Done():
 			killProcessGroup(command.Process.Pid)
-			if !processDone {
-				<-wait
-			}
+			_ = command.Wait()
 			return Result{}, ctx.Err()
 		case <-deadline.C:
 			killProcessGroup(command.Process.Pid)
-			if !processDone {
-				<-wait
-			}
+			_ = command.Wait()
 			return Result{}, ErrTimeout
 		case <-ticker.C:
 			stop, err := canceled(context.Background())
 			if err == nil && stop {
 				killProcessGroup(command.Process.Pid)
-				if !processDone {
-					<-wait
-				}
+				_ = command.Wait()
 				return Result{}, ErrCanceled
 			}
 		}
