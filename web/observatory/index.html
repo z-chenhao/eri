@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#eeefec">
+  <title>Eri · System Observatory</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="/brand/eri-favicon-32.png">
+  <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/memory.css">
+</head>
+<body>
+  <div class="observatory-shell">
+    <header class="topbar">
+      <div class="wordmark"><span class="sigil"><img src="/brand/eri-mark.png" alt=""></span><div><b>Eri</b><small>System Observatory</small></div></div>
+      <div class="live-state" id="liveState" data-live="false"><span></span><b>Connecting</b></div>
+      <time id="generatedAt">—</time>
+    </header>
+
+    <main class="dashboard">
+      <section class="health-overview">
+        <div class="health-copy">
+          <p class="eyebrow">System health</p>
+          <div class="health-title-row">
+            <span class="health-mark" id="healthMark" data-state="unknown"></span>
+            <h1 id="healthTitle">Reading system status</h1>
+          </div>
+          <p id="healthDescription">Waiting for the daemon to return recent runs and component status.</p>
+        </div>
+        <div class="sample-note"><span>Observation window</span><b>Latest 100 runs</b><small>Live local data</small></div>
+      </section>
+
+      <section class="metric-grid" id="metrics" aria-label="Key stability metrics"></section>
+
+      <section class="panel system-topology-panel" aria-labelledby="systemTopologyTitle">
+        <header class="panel-heading">
+          <div><p class="eyebrow">System topology</p><h2 id="systemTopologyTitle">System execution topology</h2></div>
+          <span>Input to delivery · edges represent runtime relationships</span>
+        </header>
+        <div class="system-topology-layout">
+          <div class="system-topology-scroll">
+            <div class="system-topology-canvas" id="systemTopologyCanvas">
+              <svg class="system-topology-edges" id="systemTopologyEdges" role="img" aria-labelledby="systemTopologyTitle systemTopologyDescription"></svg>
+              <div class="system-topology-nodes" id="systemTopologyNodes"></div>
+            </div>
+          </div>
+          <aside class="component-detail" id="componentDetail" aria-label="Selected component details"></aside>
+        </div>
+        <p class="sr-only" id="systemTopologyDescription">A directed topology of Eri system components in their real execution direction.</p>
+      </section>
+
+      <div class="dashboard-grid">
+        <section class="panel run-health">
+          <header class="panel-heading"><div><p class="eyebrow">Runs</p><h2>Run health</h2></div><span>Old → new</span></header>
+          <div class="run-pulse" id="runPulse" role="img" aria-label="Recent run status and duration"></div>
+          <div class="pulse-legend"><span data-status="succeeded">Completed</span><span data-status="active">Running</span><span data-status="failed">Failed</span><span data-status="canceled">Canceled</span></div>
+        </section>
+
+        <section class="panel attention-panel">
+          <header class="panel-heading"><div><p class="eyebrow">Attention</p><h2>Needs attention</h2></div><span id="attentionCount">0</span></header>
+          <div class="attention-list" id="attentionList"></div>
+        </section>
+      </div>
+
+      <section class="panel memory-inspector-panel" aria-labelledby="memoryInspectorTitle">
+        <header class="panel-heading">
+          <div><p class="eyebrow">Governed memory</p><h2 id="memoryInspectorTitle">Memory Inspector</h2></div>
+          <span>Stored ≠ retrieved ≠ injected ≠ applied</span>
+        </header>
+        <div class="memory-metrics" id="memoryMetrics" aria-label="Memory status summary"></div>
+        <div class="memory-inspector-layout">
+          <div class="memory-list-column">
+            <div class="memory-toolbar">
+              <label for="memorySearch">Filter memory</label>
+              <input id="memorySearch" type="search" placeholder="Content, type, scope, or status">
+            </div>
+            <div class="memory-list" id="memoryList"></div>
+          </div>
+          <aside class="memory-detail" id="memoryDetail" aria-label="Selected memory details"></aside>
+        </div>
+      </section>
+
+      <section class="panel evolution-panel" aria-labelledby="evolutionTitle">
+        <header class="panel-heading">
+          <div><p class="eyebrow">Guarded evolution</p><h2 id="evolutionTitle">Self-evolution experiments</h2></div>
+          <span>Unseen holdout → 20% canary → automatic rollback</span>
+        </header>
+        <div class="evolution-summary" id="evolutionSummary"></div>
+        <div class="evolution-list" id="evolutionList"></div>
+      </section>
+
+      <div class="dashboard-grid lower-grid">
+        <section class="panel runs-panel">
+          <header class="panel-heading"><div><p class="eyebrow">History</p><h2>Recent runs</h2></div><span>Select a run to inspect execution</span></header>
+          <div class="table-wrap">
+            <table class="run-table">
+              <thead><tr><th>Started</th><th>Status</th><th>Duration</th><th>Models</th><th>Tools</th><th>Errors</th></tr></thead>
+              <tbody id="runRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <button class="drawer-scrim" id="drawerScrim" type="button" aria-label="Close run details" hidden></button>
+  <aside class="run-drawer" id="runDrawer" aria-label="Run details" aria-hidden="true">
+    <header class="drawer-header">
+      <div><p class="eyebrow">Run inspector</p><h2 id="drawerTitle">Execution flow</h2></div>
+      <button class="icon-button" id="drawerClose" type="button" aria-label="Close run details"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"></path></svg></button>
+    </header>
+    <div class="drawer-body">
+      <section class="run-summary" id="runSummary"></section>
+
+      <section class="run-flow-section">
+        <div class="section-label">
+          <div><div class="run-canvas-breadcrumb"><button id="runCanvasBack" type="button" hidden>← Run overview</button><span id="runCanvasMode">Run overview</span></div><h3>Execution canvas</h3></div>
+          <div class="run-canvas-controls"><span id="runCanvasLegend">Recorded causality · architecture aligned</span><button id="runCanvasReset" type="button">Center</button></div>
+        </div>
+        <div class="run-flow-scroll">
+          <div class="run-flow-canvas" id="runFlowCanvas">
+            <div class="run-flow-bands" id="runFlowBands" aria-hidden="true"></div>
+            <svg class="run-flow-edges" id="runFlowEdges" role="img" aria-describedby="runFlowDescription"></svg>
+            <div class="run-flow-nodes" id="runFlowNodes"></div>
+          </div>
+        </div>
+        <aside class="run-step-detail" id="runStepDetail" aria-label="Selected run step"></aside>
+        <p class="sr-only" id="runFlowDescription"></p>
+      </section>
+
+      <div class="run-actions" id="runActions" hidden>
+        <button id="cancelRun" type="button">Cancel safely</button>
+        <button id="retryRun" type="button" hidden>Retry safely</button>
+        <button id="exportEpisode" type="button" hidden>Export episode</button>
+        <small id="runActionStatus"></small>
+      </div>
+
+      <details class="raw-events">
+        <summary>View raw committed events <span id="eventCount">0</span></summary>
+        <ol id="events"></ol>
+      </details>
+    </div>
+  </aside>
+
+  <div class="connection-notice" id="connectionNotice" role="status" hidden>Observatory data is temporarily unavailable.</div>
+  <script src="/app.js" defer></script>
+  <script src="/memory.js" defer></script>
+</body>
+</html>

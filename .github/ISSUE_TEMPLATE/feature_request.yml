@@ -1,0 +1,41 @@
+name: Feature request
+description: Propose a user outcome or engineering improvement
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the user problem before proposing implementation. Eri protects a local-first, assistant-like product model; proposals that change Soul, privacy, permissions, or external side effects need explicit design discussion.
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: What is difficult today, for whom, and in what situation?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable success without prescribing a workflow engine or fixed model reply.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Boundaries and risks
+      description: Note privacy, permission, cost, compatibility, platform, or licensing constraints.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Optional. What can users do today, and why is it insufficient?
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: I described a real outcome and did not include credentials, private conversations, or personal data.
+          required: true

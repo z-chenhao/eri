@@ -1,0 +1,38 @@
+# OS and editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.local
+
+# Go
+/eri
+/bin/
+/dist/
+/coverage/
+coverage.out
+*.test
+*.prof
+
+# Web
+node_modules/
+.vite/
+.next/
+
+# Eri local runtime data
+/.eri/
+/data/
+/runtime/
+*.db
+*.db-shm
+*.db-wal
+
+# Temporary files
+/tmp/
+*.log

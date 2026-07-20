@@ -1,0 +1,7 @@
+* @z-chenhao
+
+# These files define the trust boundary for agent-authored changes.
+/.github/ @z-chenhao
+/scripts/ @z-chenhao
+/Makefile @z-chenhao
+/AGENTS.md @z-chenhao

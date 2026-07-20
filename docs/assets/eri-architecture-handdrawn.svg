@@ -1,0 +1,291 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1350" viewBox="0 0 2400 1350" role="img" aria-labelledby="title desc">
+  <title id="title">Eri Architecture</title>
+  <desc id="desc">A calm hand-drawn overview of Eri's local-first daemon, resumable agent run, supporting systems, and process boundaries.</desc>
+
+  <defs>
+    <filter id="rough" x="-2%" y="-2%" width="104%" height="104%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.01" numOctaves="1" seed="23" result="noise"/>
+      <feDisplacementMap in="SourceGraphic" in2="noise" scale="0.75" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8.2" refY="5" markerWidth="6.2" markerHeight="6.2" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#25282b"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8.2" refY="5" markerWidth="6.2" markerHeight="6.2" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#287fbd"/>
+    </marker>
+    <marker id="arrow-gray" viewBox="0 0 10 10" refX="8.2" refY="5" markerWidth="5.6" markerHeight="5.6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#747b80"/>
+    </marker>
+    <marker id="arrow-pink" viewBox="0 0 10 10" refX="8.2" refY="5" markerWidth="5.8" markerHeight="5.8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#d96c7c"/>
+    </marker>
+    <style>
+      text {
+        font-family: "Comic Sans MS", "Klee", "Noteworthy", cursive;
+        fill: #25282b;
+        font-weight: 400;
+      }
+      .rough { filter: url(#rough); }
+      .title { font-size: 48px; font-weight: 700; fill: #dc3434; }
+      .subtitle { font-size: 21px; fill: #6a6f73; }
+      .boundary-title { font-size: 27px; font-weight: 700; fill: #dc3434; }
+      .section-title { font-size: 28px; font-weight: 700; }
+      .run-title { font-size: 22px; font-weight: 700; fill: #c9770b; }
+      .node-title { font-size: 22px; font-weight: 700; text-anchor: middle; }
+      .body { font-size: 19px; text-anchor: middle; }
+      .small { font-size: 18px; text-anchor: middle; fill: #62686c; }
+      .note { font-size: 18px; fill: #62686c; }
+      .edge-label { font-size: 18px; fill: #4f5559; text-anchor: middle; }
+      .outline { fill: #fff; stroke: #25282b; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+      .main-arrow { fill: none; stroke: #25282b; stroke-width: 3.2; stroke-linecap: round; stroke-linejoin: round; marker-end: url(#arrow); }
+      .main-both { fill: none; stroke: #25282b; stroke-width: 3.2; stroke-linecap: round; stroke-linejoin: round; marker-start: url(#arrow); marker-end: url(#arrow); }
+      .support { fill: none; stroke: #747b80; stroke-width: 2.4; stroke-dasharray: 9 9; stroke-linecap: round; stroke-linejoin: round; marker-end: url(#arrow-gray); }
+      .protocol { fill: none; stroke: #858b90; stroke-width: 2.2; stroke-dasharray: 7 9; stroke-linecap: round; stroke-linejoin: round; marker-start: url(#arrow-gray); marker-end: url(#arrow-gray); }
+      .protocol-source { fill: none; stroke: #858b90; stroke-width: 2.2; stroke-dasharray: 7 9; stroke-linecap: round; stroke-linejoin: round; marker-start: url(#arrow-gray); }
+      .protocol-out { fill: none; stroke: #858b90; stroke-width: 2.2; stroke-dasharray: 7 9; stroke-linecap: round; stroke-linejoin: round; marker-end: url(#arrow-gray); }
+      .relation { fill: none; stroke: #858b90; stroke-width: 2.2; stroke-dasharray: 7 9; stroke-linecap: round; stroke-linejoin: round; }
+      .blue-halo { fill: none; stroke: #fff; stroke-width: 9; stroke-linecap: round; stroke-linejoin: round; }
+      .blue-arrow { fill: none; stroke: #287fbd; stroke-width: 2.8; stroke-linecap: round; stroke-linejoin: round; marker-end: url(#arrow-blue); }
+      .pink-arrow { fill: none; stroke: #d96c7c; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; marker-end: url(#arrow-pink); }
+      .red-stroke { stroke: #dc3434; }
+      .orange-stroke { stroke: #ed8b16; }
+      .green-stroke { stroke: #219b69; }
+      .pink-stroke { stroke: #db7180; }
+      .blue-stroke { stroke: #287fbd; }
+      .gray-stroke { stroke: #7d858a; }
+      .green-text { fill: #15875a; }
+      .pink-text { fill: #c95f70; }
+      .blue-text { fill: #1f70aa; }
+      .gray-text { fill: #677075; }
+      .orange-text { fill: #c9770b; }
+      .fill-green { fill: #d9f4df; }
+      .fill-pink { fill: #fbdde1; }
+      .fill-blue { fill: #dceefd; }
+      .fill-orange { fill: #fff0cf; }
+      .fill-gray { fill: #eff1f2; }
+      .label-bg { fill: #fff; }
+    </style>
+  </defs>
+
+  <rect width="2400" height="1350" fill="#fff"/>
+
+  <!-- Header -->
+  <text x="58" y="62" class="title">Eri Architecture</text>
+  <text x="62" y="98" class="subtitle">local-first personal Agent Assistant</text>
+
+  <g class="rough">
+    <rect x="520" y="24" width="805" height="108" rx="24" fill="#fff" stroke="#219b69" stroke-width="3.5"/>
+    <rect x="545" y="66" width="255" height="48" rx="16" class="outline fill-green"/>
+    <rect x="820" y="66" width="140" height="48" rx="16" class="outline"/>
+    <rect x="980" y="66" width="315" height="48" rx="16" class="outline"/>
+    <rect x="1380" y="40" width="225" height="78" rx="22" class="outline fill-orange"/>
+  </g>
+  <text x="545" y="55" class="note green-text" style="font-weight:700">User surfaces</text>
+  <text x="672" y="98" class="body">Conversation Workspace</text>
+  <text x="890" y="98" class="body">CLI Chat</text>
+  <text x="1137" y="98" class="body">Lark / Feishu Bot</text>
+  <text x="1492" y="88" class="node-title">Time / Event</text>
+
+  <!-- Daemon trust boundary -->
+  <g class="rough">
+    <rect x="38" y="154" width="1967" height="1157" rx="50" fill="none" stroke="#dc3434" stroke-width="6"/>
+  </g>
+  <text x="70" y="201" class="boundary-title">eri daemon · local-first trust boundary</text>
+
+  <!-- Online runtime -->
+  <g class="rough">
+    <rect x="74" y="226" width="1900" height="430" rx="38" fill="none" stroke="#ed8b16" stroke-width="4.5"/>
+    <rect x="105" y="350" width="160" height="100" rx="24" class="outline fill-green"/>
+    <rect x="310" y="335" width="210" height="130" rx="24" class="outline fill-orange"/>
+    <rect x="560" y="284" width="1378" height="316" rx="30" fill="none" stroke="#b7bdc1" stroke-width="2.5" stroke-dasharray="10 10"/>
+    <rect x="600" y="350" width="220" height="115" rx="23" class="outline"/>
+    <rect x="865" y="300" width="460" height="276" rx="30" fill="none" stroke="#ed8b16" stroke-width="4"/>
+    <ellipse cx="950" cy="409" rx="61" ry="43" class="outline fill-pink"/>
+    <rect x="1115" y="346" width="155" height="76" rx="19" class="outline"/>
+    <rect x="1083" y="471" width="192" height="72" rx="19" class="outline fill-blue"/>
+    <rect x="1435" y="350" width="175" height="115" rx="23" class="outline fill-blue"/>
+    <rect x="1660" y="326" width="245" height="164" rx="25" class="outline fill-green"/>
+    <path d="M 1660 379 L 1905 379 M 1660 434 L 1905 434" fill="none" stroke="#25282b" stroke-width="2.2"/>
+  </g>
+  <g class="rough">
+    <rect x="1635" y="166" width="320" height="50" rx="17" class="outline fill-gray"/>
+  </g>
+
+  <text x="102" y="270" class="section-title orange-text">Online Assistant Runtime</text>
+  <text x="185" y="411" class="node-title">Gateway</text>
+  <text x="415" y="384" class="node-title">Durable Runtime</text>
+  <text x="415" y="417" class="small">task · scheduler</text>
+  <text x="415" y="441" class="small">lease · recovery</text>
+  <text x="585" y="318" class="run-title">Resumable Agent Run</text>
+  <text x="710" y="392" class="node-title">Context Assembly</text>
+  <text x="710" y="428" class="small">primary context or scoped assignment</text>
+  <text x="878" y="336" class="run-title">LLM-driven Agent Loop</text>
+  <text x="950" y="416" class="node-title">Model</text>
+  <text x="1192" y="393" class="node-title">Tool Call</text>
+  <text x="1179" y="499" class="body">Governed</text>
+  <text x="1179" y="526" class="body">Observation</text>
+  <text x="1522" y="392" class="node-title">Eval</text>
+  <text x="1522" y="427" class="small">LLM Judge</text>
+  <text x="1782" y="363" class="node-title">Primary Delivery</text>
+  <text x="1782" y="418" class="node-title">Outbox</text>
+  <text x="1782" y="472" class="node-title">Receipt</text>
+  <text x="1795" y="199" class="node-title">Model Gateway / Adapters</text>
+
+  <!-- Main execution path -->
+  <g>
+    <path d="M 265 400 C 280 398, 295 398, 310 400" class="main-arrow"/>
+    <path d="M 520 400 C 545 398, 575 398, 600 400" class="main-arrow"/>
+    <path d="M 820 400 C 843 400, 866 402, 889 405" class="main-arrow"/>
+    <path d="M 1011 400 C 1045 398, 1080 389, 1115 384" class="main-arrow"/>
+    <path d="M 1192 422 C 1192 440, 1191 455, 1190 471" class="main-arrow"/>
+    <path d="M 1083 507 C 1035 548, 956 537, 950 452" class="main-arrow"/>
+    <path d="M 1325 410 C 1360 408, 1400 408, 1435 410" class="main-arrow"/>
+    <path d="M 1610 410 C 1628 408, 1643 408, 1660 410" class="main-arrow"/>
+    <path d="M 1522 350 C 1522 308, 1450 292, 1385 298 C 1350 301, 1334 317, 1325 337" class="main-arrow"/>
+    <path d="M 1782 490 C 1782 574, 1640 611, 1435 615 C 1030 623, 490 621, 270 600 C 210 594, 185 531, 185 450" class="main-arrow"/>
+  </g>
+  <rect x="1342" y="381" width="97" height="28" rx="8" class="label-bg"/>
+  <text x="1390" y="402" class="edge-label">candidate</text>
+  <rect x="1365" y="282" width="170" height="28" rx="8" class="label-bg"/>
+  <text x="1450" y="303" class="edge-label">repair / escalate</text>
+  <rect x="830" y="596" width="180" height="28" rx="8" class="label-bg"/>
+  <text x="920" y="617" class="edge-label">deliver / reconcile</text>
+
+  <!-- Entry routing: rounded at the turns and outside runtime content -->
+  <g>
+    <path d="M 620 132 L 620 165 Q 620 177 608 177 L 197 177 Q 185 177 185 189 L 185 350" class="main-both"/>
+    <path d="M 1492 118 L 1492 202 Q 1492 214 1480 214 L 427 214 Q 415 214 415 226 L 415 335" class="main-arrow"/>
+  </g>
+
+  <!-- Support cards -->
+  <g class="rough">
+    <rect x="74" y="706" width="391" height="460" rx="32" fill="#fff" stroke="#7d858a" stroke-width="4"/>
+    <rect x="490" y="706" width="360" height="460" rx="32" fill="#fff" stroke="#219b69" stroke-width="4"/>
+    <rect x="875" y="706" width="410" height="460" rx="32" fill="#fff" stroke="#db7180" stroke-width="4"/>
+    <rect x="1310" y="706" width="665" height="460" rx="32" fill="#fff" stroke="#287fbd" stroke-width="4"/>
+
+    <rect x="105" y="790" width="329" height="135" rx="22" class="outline fill-gray"/>
+    <rect x="105" y="955" width="329" height="135" rx="22" class="outline"/>
+
+    <rect x="520" y="790" width="140" height="85" rx="20" class="outline fill-green"/>
+    <rect x="680" y="790" width="140" height="85" rx="20" class="outline"/>
+    <rect x="520" y="915" width="140" height="85" rx="20" class="outline"/>
+    <rect x="680" y="915" width="140" height="85" rx="20" class="outline fill-gray"/>
+
+    <rect x="905" y="790" width="350" height="88" rx="22" class="outline fill-pink"/>
+    <rect x="905" y="920" width="160" height="88" rx="22" class="outline"/>
+    <rect x="1095" y="920" width="160" height="88" rx="22" class="outline"/>
+    <rect x="905" y="1040" width="350" height="86" rx="22" class="outline"/>
+
+    <rect x="1340" y="790" width="180" height="85" rx="20" class="outline fill-blue"/>
+    <rect x="1550" y="790" width="180" height="85" rx="20" class="outline"/>
+    <rect x="1340" y="925" width="180" height="85" rx="20" class="outline"/>
+    <rect x="1550" y="925" width="180" height="85" rx="20" class="outline fill-green"/>
+    <rect x="1760" y="855" width="180" height="90" rx="20" class="outline fill-blue"/>
+  </g>
+
+  <text x="100" y="754" class="section-title gray-text">Replaceable Infrastructure</text>
+  <text x="269" y="829" class="node-title">SQLite State + Events</text>
+  <text x="269" y="866" class="small">state · indexes · outbox</text>
+  <text x="269" y="898" class="small">safe event envelopes</text>
+  <text x="269" y="995" class="node-title">Rotating Process Logs</text>
+  <text x="269" y="1032" class="small">redacted JSON · bounded retention</text>
+  <text x="269" y="1064" class="small">daemon · brokers · bootstrap</text>
+  <text x="269" y="1132" class="small">separate stores · narrow interfaces</text>
+
+  <text x="517" y="754" class="section-title green-text">Personal Context</text>
+  <text x="590" y="824" class="body">Soul /</text>
+  <text x="590" y="851" class="body">Identity</text>
+  <text x="750" y="840" class="node-title">Memory</text>
+  <text x="590" y="965" class="node-title">Skills</text>
+  <text x="750" y="948" class="body">Encrypted</text>
+  <text x="750" y="975" class="body">Content</text>
+  <text x="670" y="1095" class="small">assembled only when relevant</text>
+
+  <text x="902" y="754" class="section-title pink-text">Capability &amp; Safety</text>
+  <text x="1080" y="825" class="body">Policy · Approval · Budget</text>
+  <text x="985" y="956" class="body">Effect</text>
+  <text x="985" y="983" class="body">Intent</text>
+  <text x="1175" y="956" class="body">Tool</text>
+  <text x="1175" y="983" class="body">Gateway</text>
+  <text x="1080" y="1078" class="node-title">Provider / Plugin Bindings</text>
+  <text x="1080" y="1109" class="small">roles · built-ins · MCP</text>
+
+  <text x="1338" y="754" class="section-title blue-text">Evidence &amp; Improvement</text>
+  <text x="1430" y="840" class="node-title">Event Spine</text>
+  <text x="1640" y="827" class="body">Outcome /</text>
+  <text x="1640" y="854" class="body">Feedback</text>
+  <text x="1430" y="959" class="body">Episode /</text>
+  <text x="1430" y="986" class="body">Dataset</text>
+  <text x="1640" y="975" class="node-title">Evolution</text>
+  <text x="1850" y="909" class="body">Observability</text>
+  <text x="1642" y="1095" class="small">committed facts only</text>
+
+  <!-- External capability rail stays in the whitespace between Runtime and support cards -->
+  <path d="M 1255 1082 L 1268 1082 Q 1297 1082 1297 1053 L 1297 715 Q 1297 685 1327 685 L 1985 685" class="protocol-source"/>
+
+  <!-- One aggregate connection per support system -->
+  <g>
+    <path d="M 415 465 C 415 548, 390 640, 355 706" class="support"/>
+    <path d="M 650 706 C 650 622, 690 540, 710 465" class="support"/>
+    <path d="M 1178 543 C 1195 585, 1195 665, 1172 706" class="pink-arrow"/>
+    <path d="M 1212 706 C 1237 665, 1237 585, 1204 543" class="pink-arrow"/>
+    <path d="M 1508 600 C 1528 633, 1525 675, 1490 706" class="blue-arrow"/>
+    <path d="M 1518 706 C 1550 674, 1552 633, 1532 600" class="blue-arrow"/>
+  </g>
+  <rect x="1138" y="611" width="196" height="28" rx="8" class="label-bg"/>
+  <text x="1236" y="632" class="edge-label pink-text">call ↓ · receipt ↑</text>
+  <rect x="1438" y="638" width="228" height="28" rx="8" class="label-bg"/>
+  <text x="1552" y="659" class="edge-label blue-text">facts ↓ · instruction ↑</text>
+
+  <!-- Evidence card internal flow -->
+  <g>
+    <path d="M 1520 832 C 1530 830, 1540 830, 1550 832" class="blue-arrow"/>
+    <path d="M 1430 875 C 1428 892, 1428 909, 1430 925" class="blue-arrow"/>
+    <path d="M 1520 967 C 1530 965, 1540 965, 1550 967" class="blue-arrow"/>
+    <path d="M 1640 875 C 1642 892, 1642 909, 1640 925" class="blue-arrow"/>
+    <path d="M 1520 850 C 1590 900, 1680 900, 1760 900" class="blue-arrow"/>
+  </g>
+
+  <!-- Capability card internal flow -->
+  <g>
+    <path d="M 1080 878 C 1048 888, 1015 902, 985 920" class="main-arrow"/>
+    <path d="M 1065 964 C 1075 962, 1085 962, 1095 964" class="main-arrow"/>
+    <path d="M 1175 1008 C 1175 1018, 1175 1028, 1175 1040" class="main-arrow"/>
+  </g>
+
+  <!-- Outside the daemon -->
+  <text x="2070" y="252" class="section-title gray-text">Outside the daemon</text>
+  <g class="rough">
+    <rect x="2070" y="292" width="290" height="164" rx="28" fill="#fff" stroke="#7d858a" stroke-width="3.5"/>
+    <rect x="2070" y="520" width="290" height="120" rx="28" fill="#fff" stroke="#db7180" stroke-width="3.5"/>
+    <rect x="2070" y="690" width="290" height="130" rx="28" fill="#fff" stroke="#db7180" stroke-width="3.5"/>
+    <rect x="2070" y="950" width="290" height="144" rx="28" fill="#fff" stroke="#287fbd" stroke-width="3.5"/>
+  </g>
+  <text x="2215" y="334" class="node-title">Model Providers</text>
+  <text x="2215" y="375" class="body">Local Ollama</text>
+  <text x="2215" y="409" class="body">DeepSeek via Secret Broker</text>
+  <text x="2215" y="570" class="node-title">External Agents</text>
+  <text x="2215" y="607" class="body">registered agent providers</text>
+  <text x="2215" y="741" class="node-title">Plugins · MCP</text>
+  <text x="2215" y="780" class="body">capabilities · external APIs</text>
+  <text x="2215" y="996" class="node-title">System Observatory</text>
+  <text x="2215" y="1038" class="body">read-only safe projections</text>
+
+  <!-- External protocols use dedicated rails; only the short fan-out bends -->
+  <g>
+    <path d="M 906 379 C 882 370, 861 360, 845 348 L 845 275 Q 845 246 874 246 L 1570 246 Q 1600 246 1615 222 L 1635 191" class="protocol"/>
+    <path d="M 1955 191 L 1978 191 Q 2005 191 2005 218 L 2005 260 Q 2005 275 2014 287 L 2070 374" class="protocol"/>
+    <path d="M 1985 685 C 2012 650, 2036 602, 2070 580" class="protocol-out"/>
+    <path d="M 1985 685 C 2014 705, 2038 738, 2070 755" class="protocol-out"/>
+    <circle cx="1985" cy="685" r="4.5" fill="#858b90"/>
+    <path d="M 1940 900 L 1985 900 Q 2005 900 2015 918 L 2070 1022" class="blue-halo"/>
+    <path d="M 1940 900 L 1985 900 Q 2005 900 2015 918 L 2070 1022" class="blue-arrow"/>
+  </g>
+
+  <!-- Reading guide -->
+  <text x="76" y="1242" class="note">Solid arrows: execution flow</text>
+  <text x="310" y="1242" class="note">·</text>
+  <text x="335" y="1242" class="note">Dotted lines: composed dependencies · paired arrowheads: bidirectional protocol</text>
+  <text x="76" y="1282" class="note">Composition Root constructs modules only · Runtime is a durable shell, not a Workflow Engine · Skills are on-demand resources</text>
+</svg>

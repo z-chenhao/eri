@@ -1,0 +1,155 @@
+package agent
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+)
+
+type judgeModelFunc func(context.Context, ModelRequest) (ModelResponse, error)
+
+func (fn judgeModelFunc) Complete(ctx context.Context, request ModelRequest) (ModelResponse, error) {
+	return fn(ctx, request)
+}
+
+func (judgeModelFunc) Capabilities(context.Context) (ModelCapabilities, error) {
+	return testModelCapabilities(), nil
+}
+
+func TestJudgeTreatsFocusedClarificationAsDeliverable(t *testing.T) {
+	for _, required := range []string{
+		"including a focused question that asks only for the smallest material missing input",
+		"Never hold merely because input is required",
+		"If it already asks the question cleanly, choose pass",
+		"asks several downstream questions is not ready",
+	} {
+		if !strings.Contains(judgeSystemPrompt, required) {
+			t.Fatalf("judge prompt is missing clarification rule %q", required)
+		}
+	}
+}
+
+func TestJudgeRequiresDurableReceiptsForExplicitFeedback(t *testing.T) {
+	for _, required := range []string{
+		"confirmed_tool_ids includes builtin.feedback",
+		"require builtin.memory too",
+		"A prose acknowledgment or promise is not a Receipt",
+		"never keyword matching",
+		"lack of inspection is not proof that an action did not occur",
+		"Treat requested brevity as a real constraint",
+	} {
+		if !strings.Contains(judgeSystemPrompt+interpersonalJudgePrompt, required) {
+			t.Fatalf("judge prompt is missing feedback rule %q", required)
+		}
+	}
+}
+
+func TestModelJudgeUsesTranscriptSkillsAndConfirmedTools(t *testing.T) {
+	model := judgeModelFunc(func(_ context.Context, request ModelRequest) (ModelResponse, error) {
+		if len(request.Tools) != 0 || !request.JSONOutput || !strings.Contains(request.System, "<eri_eval_judge>") {
+			t.Fatalf("judge request can call tools or lacks rubric: %+v", request)
+		}
+		if !strings.Contains(request.System, "stable candidate context") || strings.Contains(request.System, "<agent_operating_rules>") {
+			t.Fatalf("judge inherited the wrong system role: %s", request.System)
+		}
+		if len(request.Messages) != 3 || !strings.Contains(request.Messages[2].Content, `"selected_skills":["research-decision@1.0.0"]`) || !strings.Contains(request.Messages[2].Content, `"confirmed_tool_ids":["builtin.web"]`) {
+			t.Fatalf("judge context = %+v", request.Messages)
+		}
+		return ModelResponse{Message: Message{Role: "assistant", Content: `{"result":"repair","tier":"substantive","findings":["The recommendation is not grounded in the confirmed observation."]}`}, Usage: Usage{ModelCalls: 1}}, nil
+	})
+	judge, err := NewModelJudge(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, usage, err := judge.Evaluate(context.Background(), JudgeRequest{
+		CandidateContext: "stable candidate context", TaskText: "compare options", SkillIDs: []string{"research-decision@1.0.0"},
+		ConfirmedTools: []string{"builtin.web"}, Messages: []Message{{Role: "user", Content: "compare"}, {Role: "assistant", Content: "choose A"}},
+	})
+	if err != nil || decision.Result != "repair" || decision.Tier != "substantive" || len(decision.Findings) != 1 || usage.ModelCalls != 1 {
+		t.Fatalf("decision=%+v usage=%+v err=%v", decision, usage, err)
+	}
+}
+
+func TestModelJudgeCanEvaluateInterpersonalFitWithoutRequiringWarmthEverywhere(t *testing.T) {
+	model := judgeModelFunc(func(_ context.Context, request ModelRequest) (ModelResponse, error) {
+		for _, required := range []string{
+			"<soul_guided_response_eval>",
+			"Pass a direct, purely task-focused answer",
+			"quiet, sincere, observant, low in dominance",
+			"state or change, exception, deadline, decision, recommendation and next action",
+			"Private replies should be compact",
+			"never appear sent without a confirmed Receipt",
+			"customer-service scripted",
+			"never promise action it cannot perform",
+			"Acknowledgment must not displace the next useful action",
+			"Style never overrides facts",
+		} {
+			if !strings.Contains(request.System, required) {
+				t.Fatalf("interpersonal judge prompt is missing %q", required)
+			}
+		}
+		return ModelResponse{Message: Message{Role: "assistant", Content: `{"result":"pass","tier":"routine","findings":[]}`}}, nil
+	})
+	judge, err := NewModelJudge(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, _, err := judge.Evaluate(context.Background(), JudgeRequest{
+		CandidateContext: "stable candidate context", Messages: []Message{{Role: "user", Content: "Is it fixed?"}, {Role: "assistant", Content: "It is fixed and the tests pass."}},
+		SoulGuidedResponse: true,
+	})
+	if err != nil || decision.Result != "pass" {
+		t.Fatalf("decision=%+v err=%v", decision, err)
+	}
+}
+
+func TestModelJudgeFailsClosedOnInvalidProtocol(t *testing.T) {
+	tests := []struct {
+		name     string
+		response ModelResponse
+	}{
+		{name: "not json", response: ModelResponse{Message: Message{Content: "looks fine"}}},
+		{name: "unknown result", response: ModelResponse{Message: Message{Content: `{"result":"maybe","tier":"routine","findings":[]}`}}},
+		{name: "finding required", response: ModelResponse{Message: Message{Content: `{"result":"repair","tier":"routine","findings":[]}`}}},
+		{name: "tool call", response: ModelResponse{Message: Message{ToolCalls: []ToolCall{{ID: "x", Name: "builtin.web", Arguments: []byte(`{}`)}}}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			judge, _ := NewModelJudge(judgeModelFunc(func(context.Context, ModelRequest) (ModelResponse, error) {
+				return test.response, nil
+			}))
+			if _, _, err := judge.Evaluate(context.Background(), JudgeRequest{Messages: []Message{{Role: "assistant", Content: "candidate"}}}); err == nil {
+				t.Fatal("invalid LLM Judge output was accepted")
+			}
+		})
+	}
+}
+
+func TestModelJudgeLetsTheModelRepairItsOwnInvalidProtocol(t *testing.T) {
+	calls := 0
+	judge, _ := NewModelJudge(judgeModelFunc(func(_ context.Context, request ModelRequest) (ModelResponse, error) {
+		calls++
+		if calls == 1 {
+			return ModelResponse{Message: Message{Role: "assistant", Content: `{"result":"pass","tier":"substance","findings":[]}`}, Usage: Usage{ModelCalls: 1}}, nil
+		}
+		last := request.Messages[len(request.Messages)-1]
+		if last.Role != "user" || !strings.Contains(last.Content, "required response protocol") || strings.Contains(last.Content, "map substance to substantive") {
+			t.Fatalf("generic model repair instruction = %+v", last)
+		}
+		return ModelResponse{Message: Message{Role: "assistant", Content: `{"result":"pass","tier":"substantive","findings":[]}`}, Usage: Usage{ModelCalls: 1}}, nil
+	}))
+	decision, usage, err := judge.Evaluate(context.Background(), JudgeRequest{Messages: []Message{{Role: "assistant", Content: "candidate"}}})
+	if err != nil || decision.Result != "pass" || decision.Tier != "substantive" || calls != 2 || usage.ModelCalls != 2 {
+		t.Fatalf("decision=%+v usage=%+v calls=%d err=%v", decision, usage, calls, err)
+	}
+}
+
+func TestModelJudgeRedactsProviderErrorDetailsAtCallerBoundary(t *testing.T) {
+	judge, _ := NewModelJudge(judgeModelFunc(func(context.Context, ModelRequest) (ModelResponse, error) {
+		return ModelResponse{}, errors.New("provider unavailable")
+	}))
+	if _, _, err := judge.Evaluate(context.Background(), JudgeRequest{}); err == nil || !strings.Contains(err.Error(), "LLM Judge unavailable") {
+		t.Fatalf("judge error = %v", err)
+	}
+}

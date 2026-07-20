@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#f3f2ee">
+  <meta name="apple-mobile-web-app-title" content="Eri">
+  <title>Eri</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="/brand/eri-favicon-32.png">
+  <link rel="apple-touch-icon" sizes="192x192" href="/brand/eri-icon-192.png">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/observation.css">
+</head>
+<body>
+  <div class="app-shell">
+    <main class="conversation-pane">
+      <header class="profile-header">
+        <button class="icon-button" id="searchTrigger" type="button" aria-label="Search conversation" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.4"></circle><path d="m15.5 15.5 4.2 4.2"></path></svg>
+        </button>
+
+        <div class="profile">
+          <div class="portrait" aria-hidden="true"><img src="/brand/eri-mark.png" alt=""></div>
+          <div class="identity">
+            <h1>Eri</h1>
+            <p class="presence" id="presence" data-state="offline"><span></span><b>Offline</b></p>
+          </div>
+        </div>
+
+        <button class="runtime-toggle" id="runtimeToggle" type="button" aria-label="Open run observation" aria-expanded="false">
+          <span class="runtime-dot" id="runtimeDot"></span><span>Runs</span><b id="runtimeCount">0</b>
+        </button>
+
+        <form class="search-panel" id="searchPanel" hidden>
+          <label for="searchInput">Search this conversation</label>
+          <div class="search-row">
+            <input id="searchInput" name="q" type="search" autocomplete="off" placeholder="A decision, file, or phrase">
+            <button type="submit">Find</button>
+            <button class="quiet-button" id="searchClose" type="button">Close</button>
+          </div>
+          <div class="search-results" id="searchResults" aria-live="polite"></div>
+        </form>
+      </header>
+
+      <section class="timeline" id="timeline" aria-label="Continuous conversation with Eri" aria-live="polite">
+        <div class="empty-state" id="emptyState">
+          <div class="empty-portrait" aria-hidden="true"><img src="/brand/eri-mark.png" alt=""></div>
+          <h2>I am here.</h2>
+          <p>Tell me what you would like to get done.</p>
+        </div>
+      </section>
+
+      <form class="composer" id="composer">
+        <div class="attachment-tray" id="attachmentTray" hidden aria-label="Attachments ready to send"></div>
+        <div class="composer-row">
+          <input class="sr-only" id="fileInput" type="file" multiple>
+          <button class="attachment-button" id="attachmentButton" type="button" aria-label="Add images or files">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+          </button>
+          <label class="sr-only" for="messageInput">Message Eri</label>
+          <textarea id="messageInput" rows="2" maxlength="1048576" placeholder="Message Eri" aria-keyshortcuts="Enter Shift+Enter"></textarea>
+          <button class="send-button" id="sendButton" type="submit" aria-label="Send">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 12 12-7-3.5 14-3.1-5.1L6 12Z"></path><path d="m11.4 13.9 3-3"></path></svg>
+          </button>
+        </div>
+        <div class="composer-help"><span>Shift + Enter for a new line</span><span>Enter to send</span></div>
+      </form>
+    </main>
+
+    <section class="run-workspace" id="runWorkspace" aria-label="Eri run observation" data-open="false">
+      <header class="run-header">
+        <div><p class="workspace-kicker">RUN OBSERVATION</p><h2>What Eri did</h2></div>
+        <div class="run-header-state"><span class="live-pulse" id="runLivePulse"></span><span id="runHeaderStatus">Waiting for a run</span></div>
+        <button class="run-close" id="runClose" type="button" aria-label="Close run observation">×</button>
+      </header>
+
+      <div class="run-layout">
+        <aside class="run-rail" aria-label="Recent runs">
+          <section class="now-card" id="nowCard"><small>Current activity</small><b>No run in progress</b><span>Eri is standing by</span></section>
+          <section class="run-list-section">
+            <div class="rail-heading"><h3>Recent runs</h3><span>Select to inspect</span></div>
+            <div class="activity-list" id="activityList"></div>
+          </section>
+          <p class="trace-disclosure">Only committed runtime facts are shown. Private reasoning, full prompts, and ungoverned tool results stay hidden.</p>
+        </aside>
+
+        <main class="run-inspector" id="runInspector">
+          <div class="run-empty" id="runEmpty"><span>↗</span><h3>Select an answer or run</h3><p>The execution canvas follows Eri's system architecture and only draws recorded causal dependencies.</p></div>
+          <article class="trace-view" id="traceView" hidden>
+            <header class="trace-summary">
+              <div><p class="workspace-kicker">SELECTED RUN</p><h3 id="traceTitle">Run</h3><p id="traceDescription"></p></div>
+              <div class="trace-facts" id="traceFacts"></div>
+            </header>
+            <div class="topology-heading">
+              <div class="canvas-heading-copy">
+                <div class="canvas-breadcrumb"><button id="canvasBack" type="button" hidden>← Run overview</button><span id="canvasMode">Run overview</span></div>
+                <h3 id="canvasTitle">Execution canvas</h3><p id="canvasSubtitle">Edges only represent recorded dependencies; open Agent Loop to inspect real turns.</p>
+              </div>
+              <div class="canvas-controls"><span id="canvasLegend">Runtime · Context / Memory · Agent Loop · Capabilities · Eval · Delivery</span><button id="canvasReset" type="button">Center</button></div>
+            </div>
+            <nav class="turn-strip" id="turnStrip" aria-label="Agent Loop Turn" hidden></nav>
+            <div class="topology-layout">
+              <div class="topology-scroll"><div class="topology-canvas" id="topologyCanvas"><div class="topology-bands" id="topologyBands" aria-hidden="true"></div><svg class="topology-edges" id="topologyEdges" role="img" aria-describedby="topologyDescription"></svg><div class="topology-nodes" id="topologyNodes"></div></div></div>
+              <aside class="step-inspector" id="stepInspector" aria-label="Selected step details"></aside>
+            </div>
+            <p class="sr-only" id="topologyDescription"></p>
+          </article>
+        </main>
+      </div>
+    </section>
+
+  </div>
+
+  <button class="run-scrim" id="runScrim" type="button" aria-label="Close run observation" hidden></button>
+  <div class="connection-notice" id="connectionNotice" role="status" hidden>Eri is offline. Your message was not sent.</div>
+  <script src="/app.js" defer></script>
+  <script src="/observation.js" defer></script>
+</body>
+</html>

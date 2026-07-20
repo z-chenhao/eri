@@ -1,0 +1,66 @@
+name: Bug report
+description: Report a reproducible Eri defect without sharing private data
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve Eri. For vulnerabilities, credentials, private conversations, or personal data exposure, stop here and use **Security → Report a vulnerability** instead.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Use a tag or commit SHA. Do not paste environment dumps.
+      placeholder: v0.1.0-rc.1 or abc1234
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS arm64
+        - macOS amd64
+        - Linux development environment
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Actual behavior
+      description: Explain what happened and why it is incorrect.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Use synthetic data. Redact home paths, task content, tokens, cookies, account identifiers, and provider responses.
+      placeholder: |
+        1. Run ...
+        2. Send synthetic request ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: safe_logs
+    attributes:
+      label: Sanitized diagnostic evidence
+      description: Optional. Include only the smallest relevant log excerpt after checking it contains no private content or credentials.
+      render: text
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I confirmed this report contains no secrets, personal data, private conversation content, or unredacted local paths.
+          required: true

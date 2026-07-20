@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "id": "google-workspace",
+  "name": "Google Workspace",
+  "version": "0.1.0",
+  "protocol": "mcp_stdio",
+  "runtime": {
+    "command": "eri-google-workspace"
+  },
+  "permissions": {
+    "default_effect": "privileged",
+    "tool_effects": {
+      "authorization_status": "read_only",
+      "authorization_start": "privileged",
+      "authorization_disconnect": "privileged",
+      "calendar_list_events": "read_only",
+      "calendar_create_event": "communication",
+      "gmail_list_message_metadata": "read_only",
+      "gmail_get_message_metadata": "read_only",
+      "gmail_send": "communication"
+    },
+    "sends_data_externally": true,
+    "network_domains": [
+      "www.googleapis.com",
+      "gmail.googleapis.com"
+    ],
+    "data_categories": [
+      "calendar_events",
+      "email_metadata",
+      "email_content",
+      "recipients"
+    ]
+  },
+  "auth": {
+    "mode": "external_broker",
+    "provider": "google",
+    "scopes": [
+      "https://www.googleapis.com/auth/calendar.events.readonly",
+      "https://www.googleapis.com/auth/calendar.events",
+      "https://www.googleapis.com/auth/gmail.metadata",
+      "https://www.googleapis.com/auth/gmail.send"
+    ],
+    "tool_scopes": {
+      "calendar_list_events": [
+        "https://www.googleapis.com/auth/calendar.events.readonly"
+      ],
+      "calendar_create_event": [
+        "https://www.googleapis.com/auth/calendar.events"
+      ],
+      "gmail_list_message_metadata": [
+        "https://www.googleapis.com/auth/gmail.metadata"
+      ],
+      "gmail_get_message_metadata": [
+        "https://www.googleapis.com/auth/gmail.metadata"
+      ],
+      "gmail_send": [
+        "https://www.googleapis.com/auth/gmail.send"
+      ]
+    },
+    "public_tools": [
+      "authorization_status",
+      "authorization_start",
+      "authorization_disconnect"
+    ],
+    "broker_endpoint_environment": "ERI_GOOGLE_AUTH_BROKER",
+    "redemption_endpoint_environment": "ERI_GOOGLE_AUTH_REDEMPTION_BROKER"
+  }
+}
