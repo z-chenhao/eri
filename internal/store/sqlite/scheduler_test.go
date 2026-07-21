@@ -65,8 +65,14 @@ func TestCommitmentFirePreservesCreatingLarkTarget(t *testing.T) {
 	}
 	if claimedTask.CurrentTask.TaskID != fireTaskID || claimedTask.CurrentTask.CommitmentID != commitment.ID ||
 		claimedTask.CurrentTask.SourceKind != "internal_trigger" || claimedTask.CurrentTask.SourceRole != "system" ||
-		claimedTask.CurrentTask.TriggerChannel != "scheduler" || !claimedTask.CurrentTask.ScheduledFor.Equal(commitment.NextRunAt) {
+		claimedTask.CurrentTask.TriggerChannel != "scheduler" || claimedTask.CurrentTask.TriggerEvent != "commitment.due" ||
+		claimedTask.CurrentTask.TriggerState != "occurred" || claimedTask.CurrentTask.ExecutionPhase != "fulfillment" ||
+		!claimedTask.CurrentTask.ScheduledFor.Equal(commitment.NextRunAt) {
 		t.Fatalf("scheduled task capsule = %+v", claimedTask.CurrentTask)
+	}
+	if len(claimedTask.Messages) != 1 || claimedTask.Messages[0].ID != claimedTask.CurrentTask.SourceInteractionID ||
+		claimedTask.Messages[0].Kind != "internal_trigger" {
+		t.Fatalf("fulfillment context replayed unrelated conversation: %+v", claimedTask.Messages)
 	}
 	objective, err := contentStore.Get(ctx, claimedTask.ObjectiveRef)
 	if err != nil || !bytes.Contains(objective, []byte("Go to the bathroom")) {

@@ -19,6 +19,7 @@ import (
 type Schedule struct {
 	Type            string    `json:"type"`
 	At              time.Time `json:"at,omitempty"`
+	AfterSeconds    int64     `json:"after_seconds,omitempty"`
 	IntervalSeconds int64     `json:"interval_seconds,omitempty"`
 	DailyTime       string    `json:"daily_time,omitempty"`
 	Timezone        string    `json:"timezone,omitempty"`
@@ -90,6 +91,10 @@ func (s *Service) Create(ctx context.Context, sourceTaskID string, request Creat
 		return Commitment{}, err
 	}
 	now := s.now().UTC()
+	request.Schedule, err = resolveSchedule(request.Schedule, now)
+	if err != nil {
+		return Commitment{}, err
+	}
 	next, err := FirstRun(request.Schedule, now)
 	if err != nil {
 		return Commitment{}, err
@@ -131,6 +136,10 @@ func (s *Service) Update(ctx context.Context, sourceTaskID, id string, request C
 		return Commitment{}, err
 	}
 	now := s.now().UTC()
+	request.Schedule, err = resolveSchedule(request.Schedule, now)
+	if err != nil {
+		return Commitment{}, err
+	}
 	next, err := FirstRun(request.Schedule, now)
 	if err != nil {
 		return Commitment{}, err
@@ -148,6 +157,24 @@ func (s *Service) Update(ctx context.Context, sourceTaskID, id string, request C
 		return Commitment{}, err
 	}
 	return updated, nil
+}
+
+func resolveSchedule(schedule Schedule, now time.Time) (Schedule, error) {
+	if schedule.AfterSeconds < 0 {
+		return Schedule{}, fmt.Errorf("after_seconds must be positive")
+	}
+	if schedule.AfterSeconds == 0 {
+		return schedule, nil
+	}
+	if schedule.Type != "once" {
+		return Schedule{}, fmt.Errorf("after_seconds is supported only for one-time schedules")
+	}
+	if !schedule.At.IsZero() {
+		return Schedule{}, fmt.Errorf("one-time schedule must use either at or after_seconds, not both")
+	}
+	schedule.At = now.Add(time.Duration(schedule.AfterSeconds) * time.Second).UTC()
+	schedule.AfterSeconds = 0
+	return schedule, nil
 }
 
 func normalizeRequest(sourceTaskID string, request CreateRequest) (CreateRequest, error) {
