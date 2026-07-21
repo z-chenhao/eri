@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/z-chenhao/eri/internal/feedback"
+	"github.com/z-chenhao/eri/internal/identifier"
 )
 
 // CaptureFeedback resolves the referenced delivery inside the feedback task's
@@ -75,6 +76,16 @@ func (s *Store) CaptureFeedback(ctx context.Context, request feedback.CaptureReq
 		"artifact_id": request.ArtifactID, "delivery_id": request.DeliveryID,
 		"kind": request.Kind, "outcome": request.Outcome,
 	}, request.CreatedAt); err != nil {
+		return feedback.Record{}, err
+	}
+	outboxID, err := identifier.New()
+	if err != nil {
+		return feedback.Record{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO internal_outbox(id, kind, aggregate_id, status, attempts, available_at, created_at, updated_at)
+		VALUES(?, 'evolution.feedback', ?, 'pending', 0, ?, ?, ?)`, outboxID, request.ID,
+		formatTime(request.CreatedAt), formatTime(request.CreatedAt), formatTime(request.CreatedAt)); err != nil {
 		return feedback.Record{}, err
 	}
 	if err := tx.Commit(); err != nil {

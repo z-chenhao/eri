@@ -58,6 +58,7 @@ type Signal struct {
 
 type Repository interface {
 	EvolutionReleasesForRouting(context.Context) (Release, bool, Release, bool, error)
+	FeedbackEvolutionSignal(context.Context, string) (Signal, bool, error)
 	SaveEvolutionSignal(context.Context, Signal) error
 	RecentEvolutionSignals(context.Context, int) ([]Signal, error)
 	StartEvolutionCanary(context.Context, Release, string) (Release, bool, error)
@@ -144,6 +145,24 @@ func (s *Service) Observe(ctx context.Context, input agent.EvolutionSignal) erro
 		return err
 	}
 	s.logger.Info("evolution signal recorded", "component", "evolution", "signal_id", signal.ID, "task_id", signal.TaskID, "release_id", signal.ReleaseID, "result", signal.Result, "tier", signal.Tier, "finding_count", len(input.Findings))
+	return nil
+}
+
+// HandleFeedback converts one causally linked post-delivery Feedback record
+// into an idempotent Evolution signal. The signal reuses the governed Feedback
+// content reference instead of copying private text into operational state.
+func (s *Service) HandleFeedback(ctx context.Context, item runtime.OutboxItem) error {
+	signal, found, err := s.repository.FeedbackEvolutionSignal(ctx, item.AggregateID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("feedback %s is unavailable for evolution", item.AggregateID)
+	}
+	if err := s.repository.SaveEvolutionSignal(ctx, signal); err != nil {
+		return err
+	}
+	s.logger.Info("posterior feedback evolution signal recorded", "component", "evolution", "feedback_id", item.AggregateID, "task_id", signal.TaskID, "release_id", signal.ReleaseID, "result", signal.Result)
 	return nil
 }
 
@@ -290,7 +309,9 @@ func (s *Service) loadEvidence(ctx context.Context, signals []Signal) ([]evidenc
 			return nil, err
 		}
 		var findings []string
-		if err := json.Unmarshal(body, &findings); err != nil {
+		if signal.FindingsRef.MediaType == "text/plain; charset=utf-8" || signal.FindingsRef.MediaType == "text/plain" {
+			findings = []string{strings.TrimSpace(string(body))}
+		} else if err := json.Unmarshal(body, &findings); err != nil {
 			return nil, err
 		}
 		result = append(result, evidence{Result: signal.Result, Tier: signal.Tier, Findings: findings})

@@ -300,7 +300,7 @@ Use stable opaque IDs without private meaning.
 
 ### 7.1 Interaction routing
 
-An inbound Interaction becomes `create`, `append`, `amend`, `answer`, `cancel`, or `ambient`. Routing uses explicit reply target and pending decision first, then entity and semantic context. Ambiguity that changes side effects becomes a user question; it never silently attaches to the wrong Task.
+An inbound Interaction becomes `create`, `append`, `amend`, `answer`, `cancel`, or `ambient`. Routing uses explicit reply target and pending decision first, then entity and semantic context. An unthreaded Interaction may join a dispatched foreground Task only while that Task owns the latest Conversation frontier; resuming an older wait never lets it capture a newer branch. Before Eval, side effects, or Delivery, a resumed Task reconciles later authoritative Conversation evidence without treating other Tasks as amendments. Ambiguity that changes side effects becomes a user question; it never silently attaches to the wrong Task.
 
 ## 8. State, Event Spine, and Content Store
 
@@ -642,7 +642,7 @@ An Episode becomes a Dataset Candidate only after purpose and user authorization
 
 ### 17.5 Guarded online evolution
 
-At least six eligible failure signals create a candidate experiment. Keep generation evidence separate from unseen holdout. Candidate scope is a small runtime instruction outside protected boundaries. An independent Judge compares candidate to baseline offline.
+At least six eligible failure signals create a candidate experiment. Eligible evidence includes both pre-delivery non-Pass Eval and causally linked post-delivery correction, rejection, or failed/mixed real-world outcome; a pre-delivery Pass never erases later user evidence. Keep generation evidence separate from unseen holdout. Candidate scope is a small runtime instruction outside protected boundaries. An independent Judge compares candidate to baseline offline.
 
 Release routing uses stable `release_id + task_id` hashing: a Canary receives approximately 20%; other Tasks use Active or baseline. The first non-Pass retires the Canary. Eight online Pass outcomes promote it and retire the previous Active. Every decision retains evidence and supports manual rollback. Evolution instructions are retrieved only through `InstructionForTask(ctx, taskID)` so routing cannot drift within a Task.
 

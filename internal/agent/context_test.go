@@ -76,6 +76,36 @@ func TestBuildMessagesSendsImagesOnlyToVisionCapableProvider(t *testing.T) {
 	}
 }
 
+func TestBuildMessagesScopesOtherTasksWithoutChangingCurrentTaskText(t *testing.T) {
+	contentStore, err := content.New(t.TempDir(), []byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentRef, err := contentStore.Put(context.Background(), []byte("Finish the approved draft."), content.Metadata{MediaType: "text/plain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherRef, err := contentStore.Put(context.Background(), []byte("Start a separate research task."), content.Metadata{MediaType: "text/plain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{content: contentStore}
+	task := TaskContext{TaskID: "current-task", Messages: []ContextRecord{
+		{ID: "current-message", TaskID: "current-task", Role: "user", ContentRef: currentRef},
+		{ID: "other-message", TaskID: "other-task", Role: "user", ContentRef: otherRef},
+	}}
+	messages, err := service.buildMessages(context.Background(), task, ModelCapabilities{ContextTokens: 32_768})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 3 || !strings.Contains(messages[0].Content, "relationship evidence") || !strings.Contains(messages[2].Content, "<other_task_context>") {
+		t.Fatalf("scoped messages=%+v", messages)
+	}
+	if got := latestTaskContentForTask(messages, task.Messages, task.TaskID); got != "Finish the approved draft." {
+		t.Fatalf("current task text=%q", got)
+	}
+}
+
 func TestCurrentTaskMessagesPreserveSchedulerProvenanceAndObjective(t *testing.T) {
 	scheduledFor := time.Date(2026, time.July, 21, 1, 0, 0, 0, time.UTC)
 	messages := currentTaskMessages(execution.TaskCapsule{
@@ -142,6 +172,7 @@ func TestFulfillmentTaskCannotSeeSourceCommitmentCapability(t *testing.T) {
 type contextTestRepository struct {
 	checkpoint ContextCheckpoint
 	inputs     []ContextRecord
+	updates    []ContextRecord
 	manifest   string
 }
 
@@ -277,6 +308,51 @@ func TestJoinedInputRefreshesCurrentStepWithoutReplacingTaskCapsule(t *testing.T
 	}
 }
 
+func TestConversationUpdateIsEvidenceNotCurrentTaskAmendment(t *testing.T) {
+	contentStore, err := content.New(t.TempDir(), []byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := contentStore.Put(context.Background(), []byte("A later task already confirmed the external name."), content.Metadata{MediaType: "text/plain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsule := execution.TaskCapsule{TaskID: "older-task", SourceInteractionID: "older-input", SourceKind: "text", SourceRole: "user", TriggerChannel: "lark"}
+	repository := &contextTestRepository{updates: []ContextRecord{{
+		ID: "later-delivery", TaskID: "later-task", DeliveryID: "delivery-exact", Kind: "text",
+		Sequence: 9, Role: "assistant", ContentRef: ref,
+	}}}
+	service := &Service{content: contentStore, logger: slog.Default()}
+	service.repository = contextRepositoryAdapter{contextTestRepository: repository}
+	request := ModelRequest{Messages: currentTaskMessages(capsule, "Continue the older task.", 3)}
+	state := loopState{
+		TaskText: "Continue the older task.", InputSequence: 3, ConversationSequence: 4,
+		Capabilities:    ModelCapabilities{ContextTokens: 8_000},
+		ContextManifest: execution.ContextManifest{CurrentTask: &capsule, ConversationSequence: 4},
+	}
+	changed, err := service.refreshConversationUpdates(context.Background(), TaskContext{
+		TaskID: "older-task", RunID: "run", InvocationID: "invocation", CurrentTask: capsule,
+	}, &request, &state)
+	if err != nil || !changed {
+		t.Fatalf("refresh changed=%t err=%v", changed, err)
+	}
+	joined := ""
+	for _, message := range request.Messages {
+		joined += message.Content
+	}
+	for _, expected := range []string{"<conversation_update>", "not amendments", `delivery_id="delivery-exact"`, "Resume only the current Task"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("Conversation update is missing %q: %s", expected, joined)
+		}
+	}
+	if state.TaskText != "Continue the older task." || state.InputSequence != 3 || state.ConversationSequence != 9 {
+		t.Fatalf("state after Conversation update=%+v", state)
+	}
+	if last := request.Messages[len(request.Messages)-1]; !strings.HasPrefix(last.Content, "<current_step>") {
+		t.Fatalf("current step is not final: %+v", last)
+	}
+}
+
 // contextRepositoryAdapter supplies the main Repository methods without
 // weakening the production interface merely for this focused test.
 type contextRepositoryAdapter struct{ *contextTestRepository }
@@ -315,4 +391,7 @@ func (contextRepositoryAdapter) SaveAgentCheckpoint(context.Context, TaskContext
 }
 func (r contextRepositoryAdapter) LoadTaskInputsAfter(context.Context, string, int64) ([]ContextRecord, error) {
 	return append([]ContextRecord(nil), r.inputs...), nil
+}
+func (r contextRepositoryAdapter) LoadConversationUpdatesAfter(context.Context, string, int64) ([]ContextRecord, error) {
+	return append([]ContextRecord(nil), r.updates...), nil
 }

@@ -109,6 +109,10 @@ type ReconcileResult struct {
 // turn that no longer includes the newest user message.
 var ErrStaleTaskInput = errors.New("task input changed")
 
+// ErrStaleConversationContext prevents a new effect from being planned after
+// another Task advanced the authoritative Conversation.
+var ErrStaleConversationContext = errors.New("conversation context changed")
+
 type IntentStatus string
 
 const (
@@ -122,29 +126,30 @@ const (
 )
 
 type Intent struct {
-	ID                     string
-	TaskID                 string
-	RunID                  string
-	InvocationID           string
-	ToolCallID             string
-	BasisInputSequence     int64
-	ParentIntentID         string
-	ToolID                 string
-	ToolVersion            string
-	Effect                 policy.EffectClass
-	Target                 string
-	ParametersHash         string
-	PayloadRef             content.Ref
-	IdempotencyKey         string
-	Control                policy.ControlLevel
-	ApprovalID             string
-	GrantID                string
-	ReconciliationStrategy string
-	Status                 IntentStatus
-	ResultRef              content.Ref
-	ErrorCode              string
-	CreatedAt              time.Time
-	UpdatedAt              time.Time
+	ID                        string
+	TaskID                    string
+	RunID                     string
+	InvocationID              string
+	ToolCallID                string
+	BasisInputSequence        int64
+	BasisConversationSequence int64
+	ParentIntentID            string
+	ToolID                    string
+	ToolVersion               string
+	Effect                    policy.EffectClass
+	Target                    string
+	ParametersHash            string
+	PayloadRef                content.Ref
+	IdempotencyKey            string
+	Control                   policy.ControlLevel
+	ApprovalID                string
+	GrantID                   string
+	ReconciliationStrategy    string
+	Status                    IntentStatus
+	ResultRef                 content.Ref
+	ErrorCode                 string
+	CreatedAt                 time.Time
+	UpdatedAt                 time.Time
 }
 
 type IntentStore interface {
@@ -174,17 +179,18 @@ type Grant struct {
 }
 
 type Request struct {
-	TaskID             string
-	RunID              string
-	InvocationID       string
-	ToolCallID         string
-	BasisInputSequence int64
-	ParentIntentID     string
-	ToolID             string
-	Input              json.RawMessage
-	MinimumControl     policy.ControlLevel
-	Grant              *Grant
-	Scope              *CapabilityScope
+	TaskID                    string
+	RunID                     string
+	InvocationID              string
+	ToolCallID                string
+	BasisInputSequence        int64
+	BasisConversationSequence int64
+	ParentIntentID            string
+	ToolID                    string
+	Input                     json.RawMessage
+	MinimumControl            policy.ControlLevel
+	Grant                     *Grant
+	Scope                     *CapabilityScope
 }
 
 // CapabilityScope is a Runtime-enforced ceiling for a restricted Agent Loop.
@@ -367,7 +373,8 @@ func (g *Gateway) Invoke(ctx context.Context, request Request) (Outcome, error) 
 	}
 	intent := Intent{
 		ID: intentID, TaskID: request.TaskID, RunID: request.RunID, InvocationID: request.InvocationID,
-		ToolCallID: request.ToolCallID, BasisInputSequence: request.BasisInputSequence, ParentIntentID: request.ParentIntentID,
+		ToolCallID: request.ToolCallID, BasisInputSequence: request.BasisInputSequence,
+		BasisConversationSequence: request.BasisConversationSequence, ParentIntentID: request.ParentIntentID,
 		ToolID: descriptor.ID, ToolVersion: descriptor.Version,
 		Effect: prepared.Action.Effect, Target: prepared.Action.Target,
 		ParametersHash: parametersHash, PayloadRef: payloadRef,

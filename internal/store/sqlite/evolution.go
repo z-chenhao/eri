@@ -4,10 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/z-chenhao/eri/internal/eval"
 	"github.com/z-chenhao/eri/internal/evolution"
+	"github.com/z-chenhao/eri/internal/feedback"
 	"github.com/z-chenhao/eri/internal/identifier"
 )
 
@@ -58,6 +61,67 @@ func (s *Store) loadEvolutionRelease(ctx context.Context, predicate, order strin
 	return release, true, err
 }
 
+func (s *Store) FeedbackEvolutionSignal(ctx context.Context, feedbackID string) (evolution.Signal, bool, error) {
+	var signal evolution.Signal
+	var kind feedback.Kind
+	var outcome feedback.OutcomeStatus
+	var refJSON, created string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, source_task_id, kind, outcome, statement_ref_json, created_at
+		FROM feedback_records WHERE id = ?`, feedbackID).
+		Scan(&signal.ID, &signal.TaskID, &kind, &outcome, &refJSON, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return evolution.Signal{}, false, nil
+	}
+	if err != nil {
+		return evolution.Signal{}, false, err
+	}
+	if err := json.Unmarshal([]byte(refJSON), &signal.FindingsRef); err != nil {
+		return evolution.Signal{}, false, err
+	}
+	signal.CreatedAt, err = parseTime(created)
+	if err != nil {
+		return evolution.Signal{}, false, err
+	}
+	signal.Tier = "substantive"
+	switch kind {
+	case feedback.Accepted:
+		signal.Result = string(eval.Pass)
+	case feedback.Correction, feedback.Rejected:
+		signal.Result = string(eval.Repair)
+	case feedback.Outcome:
+		switch outcome {
+		case feedback.OutcomeSuccess:
+			signal.Result = string(eval.Pass)
+		case feedback.OutcomeFailure, feedback.OutcomeMixed:
+			signal.Result = string(eval.Repair)
+		case feedback.OutcomeUnknown:
+			signal.Result = string(eval.Hold)
+		default:
+			return evolution.Signal{}, false, fmt.Errorf("feedback %s has invalid outcome %q", feedbackID, outcome)
+		}
+	default:
+		return evolution.Signal{}, false, fmt.Errorf("feedback %s has invalid kind %q", feedbackID, kind)
+	}
+	var manifestJSON string
+	err = s.db.QueryRowContext(ctx, `
+		SELECT context_manifest_json FROM invocations
+		WHERE task_id = ? AND kind = 'model'
+		ORDER BY created_at DESC LIMIT 1`, signal.TaskID).Scan(&manifestJSON)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return evolution.Signal{}, false, err
+	}
+	if err == nil {
+		var manifest struct {
+			EvolutionReleaseID string `json:"evolution_release_id"`
+		}
+		if json.Unmarshal([]byte(manifestJSON), &manifest) == nil {
+			signal.ReleaseID = manifest.EvolutionReleaseID
+		}
+	}
+	return signal, true, nil
+}
+
 func (s *Store) SaveEvolutionSignal(ctx context.Context, signal evolution.Signal) error {
 	refJSON, err := json.Marshal(signal.FindingsRef)
 	if err != nil {
@@ -71,10 +135,19 @@ func (s *Store) SaveEvolutionSignal(ctx context.Context, signal evolution.Signal
 	if err := insertContentRef(ctx, tx, signal.FindingsRef, signal.CreatedAt); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 		INSERT INTO evolution_signals(id, task_id, release_id, result, tier, findings_ref_json, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?)`, signal.ID, signal.TaskID, signal.ReleaseID, signal.Result, signal.Tier, string(refJSON), formatTime(signal.CreatedAt)); err != nil {
+		VALUES(?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO NOTHING`, signal.ID, signal.TaskID, signal.ReleaseID, signal.Result, signal.Tier, string(refJSON), formatTime(signal.CreatedAt))
+	if err != nil {
 		return err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if inserted == 0 {
+		return tx.Commit()
 	}
 	if signal.ReleaseID != "" {
 		if signal.Result == "pass" {

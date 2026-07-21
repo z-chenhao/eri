@@ -26,6 +26,8 @@ Read only the task-relevant sections before working. The product document explai
 5. Deliver the smallest real end-to-end slice. Do not pre-create a future package tree or placeholder abstractions.
 6. Run relevant checks, inspect the complete diff, and report evidence.
 
+For Agent behavior, first make Context Assembly carry the smallest authoritative context that is sufficient for the decision. Keep the stable Prompt short, general, and explicit about durable capabilities and evidence boundaries. Do not accumulate transcript-specific `case` branches, keyword rules, or examples when one causal invariant, context boundary, or plain instruction solves the class. Prefer the simplest complete design: fewer states, less context, and less latency are part of correctness.
+
 AI-native development does not remove requirements, design constraints, or verification. High autonomy must remain reviewable.
 
 ## Architecture guardrails

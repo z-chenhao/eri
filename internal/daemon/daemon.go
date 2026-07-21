@@ -516,10 +516,11 @@ func New(ctx context.Context, cfg config.Config, dependencies Dependencies) (_ *
 		"effect.reconcile": func(ctx context.Context, item runtime.OutboxItem) error {
 			return toolGateway.Reconcile(ctx, item.AggregateID, item.Attempts)
 		},
-		"delivery.send":     deliveryService.HandleSend,
-		"episode.build":     episodeService.HandleBuild,
-		"evolution.propose": evolutionService.HandlePropose,
-		"data.erase":        userDataService.HandleErase,
+		"delivery.send":      deliveryService.HandleSend,
+		"episode.build":      episodeService.HandleBuild,
+		"evolution.feedback": evolutionService.HandleFeedback,
+		"evolution.propose":  evolutionService.HandlePropose,
+		"data.erase":         userDataService.HandleErase,
 	}
 	handlers["subagent.eri_native.run"] = nativeSubagent.HandleRun
 	if codexService != nil {

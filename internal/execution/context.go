@@ -88,6 +88,7 @@ type ContextManifest struct {
 	EvolutionReleaseVersion int                 `json:"evolution_release_version,omitempty"`
 	ProviderCapabilities    ModelCapabilities   `json:"provider_capabilities"`
 	MessageIDs              []string            `json:"message_ids,omitempty"`
+	ConversationSequence    int64               `json:"conversation_sequence,omitempty"`
 	AttachmentIDs           []string            `json:"attachment_ids,omitempty"`
 	ContextWindowTokens     int                 `json:"context_window_tokens,omitempty"`
 	OutputReservedTokens    int                 `json:"output_reserved_tokens,omitempty"`
