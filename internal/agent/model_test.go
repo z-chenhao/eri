@@ -203,20 +203,54 @@ func TestAssembleRunPromptsKeepsStableAndEvaluationRolesSeparate(t *testing.T) {
 		observed,
 	)
 	skillIndex := strings.Index(prompts.AgentSystem, "<available_skills>")
-	evolutionIndex := strings.Index(prompts.AgentSystem, "Runtime improvement instruction")
-	runtimeIndex := strings.Index(prompts.AgentSystem, "<current_runtime_context>")
-	if skillIndex < 0 || evolutionIndex <= skillIndex || runtimeIndex <= evolutionIndex {
-		t.Fatalf("agent prompt layer order is unstable: skill=%d evolution=%d runtime=%d", skillIndex, evolutionIndex, runtimeIndex)
+	if skillIndex < 0 {
+		t.Fatalf("agent stable prompt lost skill catalog: %s", prompts.AgentSystem)
+	}
+	for _, volatile := range []string{"Runtime improvement instruction", "<current_runtime_context>", "2026-07-20"} {
+		if strings.Contains(prompts.AgentSystem, volatile) {
+			t.Fatalf("agent stable prompt contains volatile layer %q: %s", volatile, prompts.AgentSystem)
+		}
+	}
+	dynamic := ""
+	for _, message := range prompts.DynamicContext {
+		dynamic += message.Content
+	}
+	evolutionIndex := strings.Index(dynamic, "<runtime_improvement>")
+	runtimeIndex := strings.Index(dynamic, "<current_runtime_context>")
+	if evolutionIndex < 0 || runtimeIndex <= evolutionIndex {
+		t.Fatalf("dynamic prompt layer order is unstable: evolution=%d runtime=%d", evolutionIndex, runtimeIndex)
 	}
 	for _, forbidden := range []string{"<agent_operating_rules>", "<available_skills>", "Runtime improvement instruction"} {
 		if strings.Contains(prompts.JudgeContext, forbidden) {
 			t.Fatalf("Judge context inherited generation-only layer %q", forbidden)
 		}
 	}
-	for _, required := range []string{"<eri_soul>", "stable soul", "2026-07-20T09:30:00+08:00", "Source channel: web"} {
+	for _, required := range []string{"<eri_soul>", "stable soul", "Current local date: 2026-07-20", "Source channel: web"} {
 		if !strings.Contains(prompts.JudgeContext, required) {
 			t.Fatalf("Judge context is missing %q: %s", required, prompts.JudgeContext)
 		}
+	}
+}
+
+func TestAssembleRunPromptsKeepsRootSystemByteStableAcrossVolatileRuns(t *testing.T) {
+	snapshot := identity.Snapshot{Soul: "stable soul"}
+	first := assembleRunPrompts(snapshot, "<available_skills>stable catalog</available_skills>", "experiment one", memory.Bundle{}, "web",
+		time.Date(2026, time.July, 20, 9, 30, 1, 0, time.UTC))
+	second := assembleRunPrompts(snapshot, "<available_skills>stable catalog</available_skills>", "experiment two", memory.Bundle{
+		Entries: []memory.Entry{{Snapshot: memory.Snapshot{MemoryID: "memory-2", ClaimID: "claim-2", Status: memory.Supported}, Statement: "durable preference"}},
+	}, "lark", time.Date(2026, time.July, 21, 22, 45, 59, 0, time.UTC))
+	if first.AgentSystem != second.AgentSystem {
+		t.Fatalf("volatile run state changed root System:\nfirst=%s\nsecond=%s", first.AgentSystem, second.AgentSystem)
+	}
+	firstDynamic, secondDynamic := "", ""
+	for _, message := range first.DynamicContext {
+		firstDynamic += message.Content
+	}
+	for _, message := range second.DynamicContext {
+		secondDynamic += message.Content
+	}
+	if firstDynamic == secondDynamic || !strings.Contains(secondDynamic, "durable preference") || !strings.Contains(secondDynamic, "Current local date: 2026-07-21") {
+		t.Fatalf("volatile suffix did not track run evidence:\nfirst=%s\nsecond=%s", firstDynamic, secondDynamic)
 	}
 }
 
@@ -241,13 +275,20 @@ func TestAssembleRunPromptsKeepsMemoryWorkflowOutOfJudgeContext(t *testing.T) {
 		"web",
 		time.Date(2026, time.July, 20, 9, 30, 0, 0, time.UTC),
 	)
-	for _, prompt := range []string{prompts.AgentSystem, prompts.JudgeContext} {
+	dynamic := ""
+	for _, message := range prompts.DynamicContext {
+		dynamic += message.Content
+	}
+	for _, prompt := range []string{dynamic, prompts.JudgeContext} {
 		if !strings.Contains(prompt, "The user prefers concise progress updates.") {
 			t.Fatalf("prompt lost relevant memory evidence: %s", prompt)
 		}
 	}
-	if !strings.Contains(prompts.AgentSystem, "operation=mark_used") {
-		t.Fatalf("agent prompt lost memory use workflow: %s", prompts.AgentSystem)
+	if strings.Contains(prompts.AgentSystem, "The user prefers concise progress updates.") || strings.Contains(prompts.AgentSystem, "operation=mark_used") {
+		t.Fatalf("stable Agent System contains dynamic Memory: %s", prompts.AgentSystem)
+	}
+	if !strings.Contains(dynamic, "operation=mark_used") {
+		t.Fatalf("agent dynamic context lost memory use workflow: %s", dynamic)
 	}
 	if strings.Contains(prompts.JudgeContext, "operation=mark_used") || strings.Contains(prompts.JudgeContext, "call builtin.memory") {
 		t.Fatalf("Judge context inherited generation-only memory workflow: %s", prompts.JudgeContext)
@@ -275,7 +316,7 @@ func TestRestoreJudgeContextMigratesLegacyCheckpointWithoutGenerationInstruction
 	service := &Service{identity: identity.Snapshot{Soul: "legacy run soul"}}
 
 	service.restoreJudgeContext(TaskContext{}, &continuation)
-	for _, required := range []string{"legacy run soul", "retrieval_id=retrieval-legacy", "memory_id=memory-legacy", "2026-07-20T09:30:00+08:00", "Source channel: web"} {
+	for _, required := range []string{"legacy run soul", "retrieval_id=retrieval-legacy", "memory_id=memory-legacy", "Current local date: 2026-07-20", "Source channel: web"} {
 		if !strings.Contains(continuation.State.JudgeContext, required) {
 			t.Fatalf("restored Judge context is missing %q: %s", required, continuation.State.JudgeContext)
 		}

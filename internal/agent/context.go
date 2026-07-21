@@ -344,6 +344,9 @@ func (s *Service) refreshTaskInputs(ctx context.Context, task TaskContext, reque
 		return false, err
 	}
 	request.Messages = append(request.Messages, messages...)
+	if task.CurrentTask.TaskID != "" {
+		request.Messages = append(request.Messages, currentStepMessage(records[len(records)-1].Sequence))
+	}
 	state.InputSequence = records[len(records)-1].Sequence
 	state.TaskText = latestTaskContent(messages)
 	state.ContextManifest.MessageIDs = append(state.ContextManifest.MessageIDs, contextRecordIDs(records, "")...)

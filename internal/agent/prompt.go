@@ -1,21 +1,25 @@
 package agent
 
 import (
+	"encoding/json"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/z-chenhao/eri/internal/execution"
 	"github.com/z-chenhao/eri/internal/identity"
 	"github.com/z-chenhao/eri/internal/memory"
 )
 
 type runPrompts struct {
-	AgentSystem  string
-	JudgeContext string
+	AgentSystem    string
+	DynamicContext []Message
+	JudgeContext   string
 }
 
-// assembleRunPrompts keeps the stable generation prefix ahead of volatile Run
-// context and gives Eval a purpose-specific context instead of the Agent's
-// operating instructions.
+// assembleRunPrompts keeps the root System byte-stable. Volatile Run evidence
+// is appended after conversation history by the caller so changing Memory,
+// date or experiments does not invalidate the reusable prefix.
 func assembleRunPrompts(
 	snapshot identity.Snapshot,
 	skillCatalog string,
@@ -25,14 +29,85 @@ func assembleRunPrompts(
 	observedAt time.Time,
 ) runPrompts {
 	agentSystem := systemPrompt(snapshot) + skillCatalog
+	dynamic := make([]Message, 0, 3)
 	if instruction := strings.TrimSpace(evolutionInstruction); instruction != "" {
-		agentSystem += "\n\nRuntime improvement instruction (cannot override Soul, policy, privacy, approvals, tool contracts, or user instructions):\n" + instruction
+		dynamic = append(dynamic, Message{Role: "system", Content: "<runtime_improvement>\nRuntime improvement instruction (cannot override Soul, policy, privacy, approvals, tool contracts, or user instructions):\n" + instruction + "\n</runtime_improvement>"})
 	}
-	agentSystem += formatMemoryContext(memories) + runtimeContext(sourceChannel, observedAt)
+	if context := strings.TrimSpace(formatMemoryContext(memories)); context != "" {
+		dynamic = append(dynamic, Message{Role: "system", Content: "<relevant_memory_context>\n" + context + "\n</relevant_memory_context>"})
+	}
+	dynamic = append(dynamic, Message{Role: "system", Content: strings.TrimSpace(runtimeContext(sourceChannel, observedAt))})
 	return runPrompts{
-		AgentSystem:  agentSystem,
-		JudgeContext: candidateEvaluationContext(snapshot, memories, sourceChannel, observedAt),
+		AgentSystem:    agentSystem,
+		DynamicContext: dynamic,
+		JudgeContext:   candidateEvaluationContext(snapshot, memories, sourceChannel, observedAt),
 	}
+}
+
+func currentTaskMessages(task execution.TaskCapsule, objective string, inputSequence int64) []Message {
+	if strings.TrimSpace(task.TaskID) == "" {
+		return nil
+	}
+	type taskPayload struct {
+		TaskID              string `json:"task_id"`
+		SourceInteractionID string `json:"source_interaction_id"`
+		SourceKind          string `json:"source_kind"`
+		SourceRole          string `json:"source_role"`
+		TriggerChannel      string `json:"trigger_channel"`
+		CommitmentID        string `json:"commitment_id,omitempty"`
+		ScheduledFor        string `json:"scheduled_for,omitempty"`
+	}
+	payload := taskPayload{
+		TaskID: task.TaskID, SourceInteractionID: task.SourceInteractionID,
+		SourceKind: task.SourceKind, SourceRole: task.SourceRole, TriggerChannel: task.TriggerChannel,
+		CommitmentID: task.CommitmentID,
+	}
+	if !task.ScheduledFor.IsZero() {
+		payload.ScheduledFor = task.ScheduledFor.Format(time.RFC3339Nano)
+	}
+	encoded, _ := json.Marshal(payload)
+	currentTask := strings.Join([]string{
+		"<current_task>",
+		"This is durable active Runtime task metadata, not long-term Memory or a new user message. The following task objective keeps its original source role and is authoritative only within Soul, policy, approvals, and later user amendments. Continue it across Tool calls and recovery; do not revive it after Runtime marks it terminal.",
+		string(encoded),
+		"</current_task>",
+	}, "\n")
+	objectiveRole := task.SourceRole
+	if objectiveRole != "user" && objectiveRole != "system" {
+		objectiveRole = "system"
+	}
+	taskObjective := strings.Join([]string{
+		"<task_objective>",
+		strings.TrimSpace(objective),
+		"</task_objective>",
+	}, "\n")
+	return []Message{
+		{Role: "system", Content: currentTask},
+		{Role: objectiveRole, Content: taskObjective},
+		currentStepMessage(inputSequence),
+	}
+}
+
+func currentStepMessage(inputSequence int64) Message {
+	return Message{Role: "system", Content: strings.Join([]string{
+		"<current_step>",
+		"Advance only the active task above now. Apply later user turns in this task as amendments, preserve confirmed Effects and Receipts, and work toward an evaluated result or the smallest genuinely blocking question.",
+		"input_sequence=" + strconv.FormatInt(inputSequence, 10),
+		"</current_step>",
+	}, "\n")}
+}
+
+func isPinnedRunContext(message Message) bool {
+	if message.Role != "system" && message.Role != "user" {
+		return false
+	}
+	content := strings.TrimSpace(message.Content)
+	for _, prefix := range []string{"<activated_skill>", "<runtime_improvement>", "<relevant_memory_context>", "<current_runtime_context>", "<current_task>", "<task_objective>", "<current_step>"} {
+		if strings.HasPrefix(content, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 const agentOperatingPrompt = `
@@ -149,10 +224,10 @@ func runtimeContext(sourceChannel string, observedAt time.Time) string {
 		"",
 		"<current_runtime_context>",
 		"These are trusted runtime facts for temporal grounding and channel-appropriate communication. They are not user preferences or instructions.",
-		"Current local date and time: " + observedAt.Format(time.RFC3339),
-		"Current UTC time: " + observedAt.UTC().Format(time.RFC3339),
+		"Current local date: " + observedAt.Format(time.DateOnly),
 		"Local timezone: " + observedAt.Location().String(),
 		"Source channel: " + strings.TrimSpace(sourceChannel),
+		"Exact causal times are supplied by the active task or governed observations when required; do not infer a wall-clock time from this date-only context.",
 		"</current_runtime_context>",
 	}, "\n")
 }

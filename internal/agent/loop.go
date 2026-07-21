@@ -643,6 +643,19 @@ func findLoopCut(messages []Message, keepTokens int) int {
 	return -1
 }
 
+func splitPinnedRunContext(messages []Message) (ordinary, pinned []Message) {
+	ordinary = make([]Message, 0, len(messages))
+	pinned = make([]Message, 0, 6)
+	for _, message := range messages {
+		if isPinnedRunContext(message) {
+			pinned = append(pinned, message)
+			continue
+		}
+		ordinary = append(ordinary, message)
+	}
+	return ordinary, pinned
+}
+
 func (s *Service) compactLoopContext(
 	ctx context.Context,
 	task TaskContext,
@@ -655,15 +668,19 @@ func (s *Service) compactLoopContext(
 	if before <= limit {
 		return request, Usage{}, nil
 	}
+	ordinary, pinned := splitPinnedRunContext(request.Messages)
+	if len(ordinary) == 0 {
+		return request, Usage{}, fmt.Errorf("context exceeds %d tokens with only pinned active-task context", limit)
+	}
 	keepTokens := defaultRecentTokens
 	if keepTokens > limit/2 {
 		keepTokens = limit / 2
 	}
-	cut := findLoopCut(request.Messages, keepTokens)
+	cut := findLoopCut(ordinary, keepTokens)
 	if cut <= 0 {
-		cut = len(request.Messages)
+		cut = len(ordinary)
 	}
-	summary, usage, err := s.summarizeContext(ctx, task.TaskID, request.Messages[:cut], capabilities)
+	summary, usage, err := s.summarizeContext(ctx, task.TaskID, ordinary[:cut], capabilities)
 	if err != nil {
 		return request, usage, err
 	}
@@ -671,15 +688,21 @@ func (s *Service) compactLoopContext(
 		Role:    "system",
 		Content: "Eri in-run context checkpoint. It summarizes prior native model/tool turns; continue the same task from it.\n\n" + summary,
 	}
-	request.Messages = append([]Message{checkpoint}, request.Messages[cut:]...)
+	request.Messages = append([]Message{checkpoint}, ordinary[cut:]...)
+	request.Messages = append(request.Messages, pinned...)
 	after := estimateModelInputTokens(request)
 	if after > limit && len(request.Messages) > 1 {
-		summary, nextUsage, err := s.summarizeContext(ctx, task.TaskID, request.Messages, capabilities)
+		ordinary, pinned = splitPinnedRunContext(request.Messages)
+		if len(ordinary) == 0 {
+			return request, usage, fmt.Errorf("context exceeds %d tokens with only pinned active-task context", limit)
+		}
+		summary, nextUsage, err := s.summarizeContext(ctx, task.TaskID, ordinary, capabilities)
 		usage = mergeUsage(usage, nextUsage)
 		if err != nil {
 			return request, usage, err
 		}
 		request.Messages = []Message{{Role: "system", Content: "Eri in-run context checkpoint.\n\n" + summary}}
+		request.Messages = append(request.Messages, pinned...)
 		after = estimateModelInputTokens(request)
 	}
 	if after > limit {
