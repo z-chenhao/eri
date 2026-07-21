@@ -1,6 +1,6 @@
-// Package evolution implements Eri's guarded online prompt-improvement loop.
-// It canary-tests small runtime instructions; Soul, policy, tool permissions,
-// code, memory truth and privacy boundaries are intentionally immutable here.
+// Package evolution learns and evaluates a bounded, versioned Experience block.
+// Experience may improve general working judgment but cannot modify Soul,
+// authority, code, Memory truth, tool contracts, or privacy boundaries.
 package evolution
 
 import (
@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/z-chenhao/eri/internal/agent"
 	"github.com/z-chenhao/eri/internal/content"
@@ -33,7 +34,7 @@ type Release struct {
 	ID                  string      `json:"id"`
 	Version             int         `json:"version"`
 	Status              string      `json:"status"`
-	InstructionRef      content.Ref `json:"-"`
+	ExperienceRef       content.Ref `json:"-"`
 	OfflineReviewRef    content.Ref `json:"-"`
 	TrainingSignalCount int         `json:"training_signal_count"`
 	HoldoutSignalCount  int         `json:"holdout_signal_count"`
@@ -48,7 +49,7 @@ type Release struct {
 
 type Signal struct {
 	ID          string
-	TaskID      string
+	RunID       string
 	ReleaseID   string
 	Result      string
 	Tier        string
@@ -89,35 +90,34 @@ func NewService(repository Repository, contentStore ContentStore, model agent.Co
 	return &Service{repository: repository, content: contentStore, model: model, budget: budget, logger: logger}, nil
 }
 
-// InstructionForTask routes a bounded deterministic cohort to a canary while
-// keeping all other tasks on the active release (or baseline when none exists).
-// The release ID is part of the hash so every new candidate gets an independent
-// cohort without persisting user profiling data.
-func (s *Service) InstructionForTask(ctx context.Context, taskID string) (agent.EvolutionInstruction, bool, error) {
-	taskID = strings.TrimSpace(taskID)
-	if taskID == "" {
-		return agent.EvolutionInstruction{}, false, fmt.Errorf("task id is required for evolution routing")
+// ExperienceForRun freezes one Experience version for the whole Run. A
+// deterministic cohort receives the current Canary; every other Run receives
+// Active Experience or the empty baseline.
+func (s *Service) ExperienceForRun(ctx context.Context, runID string) (agent.Experience, bool, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return agent.Experience{}, false, fmt.Errorf("run id is required for experience routing")
 	}
 	active, hasActive, canary, hasCanary, err := s.repository.EvolutionReleasesForRouting(ctx)
 	if err != nil {
-		return agent.EvolutionInstruction{}, false, err
+		return agent.Experience{}, false, err
 	}
 	selected, found := active, hasActive
-	if hasCanary && inCanaryCohort(taskID, canary.ID) {
+	if hasCanary && inCanaryCohort(runID, canary.ID) {
 		selected, found = canary, true
 	}
 	if !found {
-		return agent.EvolutionInstruction{}, false, nil
+		return agent.Experience{}, false, nil
 	}
-	body, err := s.content.Get(ctx, selected.InstructionRef)
+	body, err := s.content.Get(ctx, selected.ExperienceRef)
 	if err != nil {
-		return agent.EvolutionInstruction{}, false, err
+		return agent.Experience{}, false, err
 	}
-	return agent.EvolutionInstruction{ReleaseID: selected.ID, Version: selected.Version, Text: string(body)}, true, nil
+	return agent.Experience{ReleaseID: selected.ID, Version: selected.Version, Text: string(body)}, true, nil
 }
 
-func inCanaryCohort(taskID, releaseID string) bool {
-	digest := sha256.Sum256([]byte(taskID + "\x00" + releaseID))
+func inCanaryCohort(runID, releaseID string) bool {
+	digest := sha256.Sum256([]byte(runID + "\x00" + releaseID))
 	return binary.BigEndian.Uint64(digest[:8])%100 < CanaryPercent
 }
 
@@ -138,13 +138,13 @@ func (s *Service) Observe(ctx context.Context, input agent.EvolutionSignal) erro
 		return err
 	}
 	signal := Signal{
-		ID: id, TaskID: input.TaskID, ReleaseID: input.ReleaseID, Result: string(input.Result), Tier: input.Tier,
+		ID: id, RunID: input.RunID, ReleaseID: input.ExperienceReleaseID, Result: string(input.Result), Tier: input.Tier,
 		FindingsRef: ref, CreatedAt: time.Now().UTC(),
 	}
 	if err := s.repository.SaveEvolutionSignal(ctx, signal); err != nil {
 		return err
 	}
-	s.logger.Info("evolution signal recorded", "component", "evolution", "signal_id", signal.ID, "task_id", signal.TaskID, "release_id", signal.ReleaseID, "result", signal.Result, "tier", signal.Tier, "finding_count", len(input.Findings))
+	s.logger.Info("evolution signal recorded", "component", "evolution", "signal_id", signal.ID, "run_id", signal.RunID, "experience_release_id", signal.ReleaseID, "result", signal.Result, "tier", signal.Tier, "finding_count", len(input.Findings))
 	return nil
 }
 
@@ -162,7 +162,7 @@ func (s *Service) HandleFeedback(ctx context.Context, item runtime.OutboxItem) e
 	if err := s.repository.SaveEvolutionSignal(ctx, signal); err != nil {
 		return err
 	}
-	s.logger.Info("posterior feedback evolution signal recorded", "component", "evolution", "feedback_id", item.AggregateID, "task_id", signal.TaskID, "release_id", signal.ReleaseID, "result", signal.Result)
+	s.logger.Info("posterior feedback evolution signal recorded", "component", "evolution", "feedback_id", item.AggregateID, "run_id", signal.RunID, "experience_release_id", signal.ReleaseID, "result", signal.Result)
 	return nil
 }
 
@@ -202,10 +202,10 @@ func (s *Service) HandlePropose(ctx context.Context, item runtime.OutboxItem) er
 		return err
 	}
 	modelRequest := agent.ModelRequest{
-		System:   `You are the candidate generator in Eri's guarded self-evolution experiment. Infer a recurring, general execution weakness from the supplied training findings. Return JSON only: {"candidates":[{"instruction":"...","rationale":"..."}]}. Return one or two materially different candidates. Each instruction must be observable, task-independent, and under 1200 bytes. It may improve execution or answer validation, but must not alter Soul/personality, user ownership, privacy, authorization, policy, tool permissions, memory truth, provider choice, delivery gates, source requirements, code, or user instructions. Never include secrets or copy task-specific facts.`,
+		System:   `You maintain Eri's versioned Experience: a short list of general lessons learned from outcomes. Infer one recurring working weakness from the supplied training findings. Return JSON only: {"candidates":[{"experience":"- lesson one\n- lesson two","rationale":"..."}]}. Return one or two materially different complete replacement Experience lists. Each list contains one to eight concise bullet lines beginning with "- ", is observable, broadly reusable, and under 1200 bytes. Preserve useful baseline Experience while changing only what the evidence supports. Experience may improve investigation, execution, or validation, but must not alter Soul/personality, user ownership, privacy, authorization, policy, tool permissions, Memory truth, provider choice, delivery gates, source requirements, code, or user instructions. Never include secrets or copy task-specific facts.`,
 		Messages: []agent.Message{{Role: "user", Content: string(payload)}}, MaxOutputTokens: 900,
 	}
-	response, err := s.complete(ctx, signals[0].TaskID, modelRequest)
+	response, err := s.complete(ctx, signals[0].RunID, modelRequest)
 	if err != nil {
 		return err
 	}
@@ -214,8 +214,8 @@ func (s *Service) HandlePropose(ctx context.Context, item runtime.OutboxItem) er
 	}
 	var proposal struct {
 		Candidates []struct {
-			Instruction string `json:"instruction"`
-			Rationale   string `json:"rationale"`
+			Experience string `json:"experience"`
+			Rationale  string `json:"rationale"`
 		} `json:"candidates"`
 	}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(response.Message.Content)), &proposal); err != nil {
@@ -224,17 +224,17 @@ func (s *Service) HandlePropose(ctx context.Context, item runtime.OutboxItem) er
 	if len(proposal.Candidates) == 0 || len(proposal.Candidates) > 2 {
 		return fmt.Errorf("evolution proposer must return one or two candidates")
 	}
-	baseline, err := s.activeInstruction(ctx)
+	baseline, err := s.activeExperience(ctx)
 	if err != nil {
 		return err
 	}
 	var selected reviewedCandidate
 	for _, candidate := range proposal.Candidates {
-		candidate.Instruction = strings.TrimSpace(candidate.Instruction)
-		if err := validateInstruction(candidate.Instruction); err != nil {
+		candidate.Experience = strings.TrimSpace(candidate.Experience)
+		if err := validateExperience(candidate.Experience); err != nil {
 			continue
 		}
-		reviewed, err := s.reviewCandidate(ctx, signals[0].TaskID, baseline, candidate.Instruction, candidate.Rationale, holdoutEvidence)
+		reviewed, err := s.reviewCandidate(ctx, signals[0].RunID, baseline, candidate.Experience, candidate.Rationale, holdoutEvidence)
 		if err != nil {
 			return err
 		}
@@ -242,11 +242,11 @@ func (s *Service) HandlePropose(ctx context.Context, item runtime.OutboxItem) er
 			s.logger.Info("evolution candidate rejected by offline gate", "component", "evolution", "decision", reviewed.Decision, "candidate_score", reviewed.Score, "baseline_score", reviewed.Baseline, "regression_count", len(reviewed.Regressions), "safety_issue_count", len(reviewed.Safety))
 			continue
 		}
-		if selected.Instruction == "" || reviewed.Score-reviewed.Baseline > selected.Score-selected.Baseline {
+		if selected.Experience == "" || reviewed.Score-reviewed.Baseline > selected.Score-selected.Baseline {
 			selected = reviewed
 		}
 	}
-	if selected.Instruction == "" {
+	if selected.Experience == "" {
 		s.logger.Info("evolution experiment produced no releasable candidate", "component", "evolution", "candidate_count", len(proposal.Candidates), "training_signal_count", len(trainingSignals), "holdout_signal_count", len(holdoutSignals))
 		return nil
 	}
@@ -254,8 +254,8 @@ func (s *Service) HandlePropose(ctx context.Context, item runtime.OutboxItem) er
 	if err != nil {
 		return err
 	}
-	ref, err := s.content.Put(ctx, []byte(selected.Instruction), content.Metadata{
-		MediaType: "text/plain; charset=utf-8", EncryptionDomain: "evolution-release", PrivacyClass: "private",
+	ref, err := s.content.Put(ctx, []byte(selected.Experience), content.Metadata{
+		MediaType: "text/plain; charset=utf-8", EncryptionDomain: "experience-release", PrivacyClass: "private",
 		RetentionPolicy: "user_owned", ProvenanceRef: releaseID,
 	})
 	if err != nil {
@@ -274,12 +274,12 @@ func (s *Service) HandlePropose(ctx context.Context, item runtime.OutboxItem) er
 	}
 	sourceKey := sourceDigest(signals)
 	release, started, err := s.repository.StartEvolutionCanary(ctx, Release{
-		ID: releaseID, Status: "canary", InstructionRef: ref, OfflineReviewRef: reviewRef,
+		ID: releaseID, Status: "canary", ExperienceRef: ref, OfflineReviewRef: reviewRef,
 		TrainingSignalCount: len(trainingSignals), HoldoutSignalCount: len(holdoutSignals),
 		OfflineScore: selected.Score, BaselineScore: selected.Baseline, CreatedAt: time.Now().UTC(),
 	}, sourceKey)
 	if err == nil && started {
-		s.logger.Info("evolution canary started", "component", "evolution", "release_id", release.ID, "version", release.Version, "training_signal_count", release.TrainingSignalCount, "holdout_signal_count", release.HoldoutSignalCount, "candidate_score", release.OfflineScore, "baseline_score", release.BaselineScore, "canary_percent", CanaryPercent)
+		s.logger.Info("experience canary started", "component", "evolution", "experience_release_id", release.ID, "version", release.Version, "training_signal_count", release.TrainingSignalCount, "holdout_signal_count", release.HoldoutSignalCount, "candidate_score", release.OfflineScore, "baseline_score", release.BaselineScore, "canary_percent", CanaryPercent)
 	}
 	return err
 }
@@ -291,7 +291,7 @@ type evidence struct {
 }
 
 type reviewedCandidate struct {
-	Instruction string   `json:"instruction"`
+	Experience  string   `json:"experience"`
 	Rationale   string   `json:"rationale"`
 	Decision    string   `json:"decision"`
 	Score       float64  `json:"candidate_score"`
@@ -319,32 +319,32 @@ func (s *Service) loadEvidence(ctx context.Context, signals []Signal) ([]evidenc
 	return result, nil
 }
 
-func (s *Service) activeInstruction(ctx context.Context) (string, error) {
+func (s *Service) activeExperience(ctx context.Context) (string, error) {
 	active, found, _, _, err := s.repository.EvolutionReleasesForRouting(ctx)
 	if err != nil || !found {
 		return "", err
 	}
-	body, err := s.content.Get(ctx, active.InstructionRef)
+	body, err := s.content.Get(ctx, active.ExperienceRef)
 	if err != nil {
 		return "", err
 	}
 	return string(body), nil
 }
 
-func (s *Service) reviewCandidate(ctx context.Context, taskID, baseline, instruction, rationale string, holdout []evidence) (reviewedCandidate, error) {
-	result := reviewedCandidate{Instruction: instruction, Rationale: strings.TrimSpace(rationale)}
+func (s *Service) reviewCandidate(ctx context.Context, runID, baseline, experience, rationale string, holdout []evidence) (reviewedCandidate, error) {
+	result := reviewedCandidate{Experience: experience, Rationale: strings.TrimSpace(rationale)}
 	payload, err := json.Marshal(map[string]any{
-		"baseline_instruction": baseline, "candidate_instruction": instruction, "candidate_rationale": rationale,
+		"baseline_experience": baseline, "candidate_experience": experience, "candidate_rationale": rationale,
 		"holdout_findings": holdout,
 	})
 	if err != nil {
 		return result, err
 	}
 	request := agent.ModelRequest{
-		System:   `You are the independent offline gate for Eri's self-evolution experiment. The candidate did not see these holdout findings. Compare it with the current baseline for general usefulness, precision, likely regressions, and whether it touches protected Soul, ownership, privacy, authorization, policy, tool permissions, memory truth, delivery gates, code, or user instructions. Do not reward verbosity or instructions that merely restate every finding. Return JSON only: {"decision":"pass|reject","candidate_score":0.0,"baseline_score":0.0,"regressions":[],"safety_issues":[],"review_rationale":"..."}. Scores are 0..1. Pass only for a clear, general improvement without regression or protected-boundary risk.`,
+		System:   `You are the independent offline gate for Eri's versioned Experience. The candidate did not see these holdout findings. Compare the complete candidate Experience with the baseline for general usefulness, precision, likely regressions, and whether it touches protected Soul, ownership, privacy, authorization, policy, tool permissions, Memory truth, delivery gates, code, or user instructions. Do not reward verbosity or text that merely restates every finding. Return JSON only: {"decision":"pass|reject","candidate_score":0.0,"baseline_score":0.0,"regressions":[],"safety_issues":[],"review_rationale":"..."}. Scores are 0..1. Pass only for a clear, general improvement without regression or protected-boundary risk.`,
 		Messages: []agent.Message{{Role: "user", Content: string(payload)}}, MaxOutputTokens: 600,
 	}
-	response, err := s.complete(ctx, taskID, request)
+	response, err := s.complete(ctx, runID, request)
 	if err != nil {
 		return result, err
 	}
@@ -354,7 +354,7 @@ func (s *Service) reviewCandidate(ctx context.Context, taskID, baseline, instruc
 	if err := json.Unmarshal([]byte(strings.TrimSpace(response.Message.Content)), &result); err != nil {
 		return result, fmt.Errorf("decode evolution offline review: %w", err)
 	}
-	result.Instruction = instruction
+	result.Experience = experience
 	result.Rationale = strings.TrimSpace(rationale)
 	if result.Score < 0 || result.Score > 1 || result.Baseline < 0 || result.Baseline > 1 {
 		return result, fmt.Errorf("evolution reviewer returned score outside 0..1")
@@ -397,19 +397,20 @@ func (s *Service) Rollback(ctx context.Context, id string) error {
 	return nil
 }
 
-func validateInstruction(value string) error {
+func validateExperience(value string) error {
 	if value == "" || len([]byte(value)) > 1200 {
-		return fmt.Errorf("evolution instruction must be between 1 and 1200 bytes")
+		return fmt.Errorf("experience must be between 1 and 1200 bytes")
 	}
-	lower := strings.ToLower(value)
-	for _, forbidden := range []string{
-		"soul", "personality", "override policy", "ignore policy", "approval", "permission",
-		"token", "secret", "password", "cookie", "api key", "system prompt",
-		"\u7075\u9b42", "\u4eba\u683c", "\u8986\u76d6\u7b56\u7565", "\u5ffd\u7565\u7b56\u7565", "\u5ba1\u6279", "\u6743\u9650", "\u4ee4\u724c", "\u5bc6\u94a5", "\u5bc6\u7801",
-		"\u4f1a\u8bdd\u6388\u6743", "\u7cfb\u7edf\u63d0\u793a", "\u7cfb\u7edf\u6307\u4ee4",
-	} {
-		if strings.Contains(lower, forbidden) {
-			return fmt.Errorf("evolution instruction touches protected boundary %q", forbidden)
+	if !utf8.ValidString(value) || strings.ContainsRune(value, '\x00') || strings.ContainsAny(value, "<>") {
+		return fmt.Errorf("experience contains invalid text or prompt delimiters")
+	}
+	lines := strings.Split(value, "\n")
+	if len(lines) > 8 {
+		return fmt.Errorf("experience must contain at most eight lessons")
+	}
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" || !strings.HasPrefix(line, "- ") || strings.TrimSpace(strings.TrimPrefix(line, "- ")) == "" {
+			return fmt.Errorf("each experience lesson must be one non-empty bullet line")
 		}
 	}
 	return nil

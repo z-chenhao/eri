@@ -159,14 +159,6 @@ func TestDisabledSkillIsNotModelInvocable(t *testing.T) {
 	if _, err := catalog.Activate(context.Background(), "manual"); err == nil {
 		t.Fatal("model activated a user-only skill")
 	}
-	documents, err := catalog.Explicit(context.Background(), "Please use $manual to complete this")
-	if err != nil || len(documents) != 1 || documents[0].Instructions != "secret instructions" {
-		t.Fatalf("explicit activation documents=%+v err=%v", documents, err)
-	}
-	documents, err = catalog.Explicit(context.Background(), "/skill:manual run it")
-	if err != nil || len(documents) != 1 {
-		t.Fatalf("Pi-style explicit activation documents=%+v err=%v", documents, err)
-	}
 }
 
 func TestExternalSkillResourceCannotEscapeThroughSymlink(t *testing.T) {
@@ -200,7 +192,7 @@ func TestExternalSkillResourceCannotEscapeThroughSymlink(t *testing.T) {
 	}
 }
 
-func TestExternalClaudeSkillCanDeriveNameAndUseSlashInvocation(t *testing.T) {
+func TestExternalClaudeSkillCanDeriveNameAndActivateNormally(t *testing.T) {
 	userSkillRoot := filepath.Join(t.TempDir(), ".eri", "skills")
 	directory := filepath.Join(userSkillRoot, "claude-style")
 	if err := os.MkdirAll(directory, 0o700); err != nil {
@@ -213,9 +205,9 @@ func TestExternalClaudeSkillCanDeriveNameAndUseSlashInvocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	documents, err := catalog.Explicit(context.Background(), "/claude-style, do it")
-	if err != nil || len(documents) != 1 || documents[0].Name != "claude-style" {
-		t.Fatalf("Claude-style activation documents=%+v err=%v", documents, err)
+	document, err := catalog.Activate(context.Background(), "claude-style")
+	if err != nil || document.Name != "claude-style" {
+		t.Fatalf("Claude-style activation document=%+v err=%v", document, err)
 	}
 	if len(catalog.Diagnostics()) != 1 || !strings.Contains(catalog.Diagnostics()[0].Message, "derived") {
 		t.Fatalf("derived-name diagnostics=%+v", catalog.Diagnostics())

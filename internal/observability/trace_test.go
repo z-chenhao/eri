@@ -78,7 +78,7 @@ func TestRunSpansPreserveFanOutFanInAndMemoryStages(t *testing.T) {
 		runs: []RunSummary{run},
 		detail: RunDetail{
 			Run: run,
-			Invocations: []Invocation{{
+			Model: ModelExecution{
 				ID: "inv-1", Status: "succeeded", Target: "local-model", CreatedAt: now.Add(time.Second), UpdatedAt: now.Add(2 * time.Second),
 				ContextManifest: execution.ContextManifest{
 					RetrievedMemoryIDs: []string{"memory-1"}, MemoryIDs: []string{"memory-1"}, AppliedMemoryIDs: []string{"memory-1"},
@@ -86,7 +86,7 @@ func TestRunSpansPreserveFanOutFanInAndMemoryStages(t *testing.T) {
 					SkillIDs: []string{"travel"}, ToolIDs: []string{"calendar", "files"},
 				},
 				Usage: map[string]any{"model_calls": float64(2), "input_tokens": float64(120), "output_tokens": float64(30)},
-			}},
+			},
 			Effects: []Effect{
 				{ID: "effect-a", ToolID: "calendar", Target: "plan", Status: "confirmed", CreatedAt: now.Add(2 * time.Second)},
 				{ID: "effect-b", ToolID: "files", Target: "brief.md", Status: "confirmed", CreatedAt: now.Add(2 * time.Second)},
@@ -156,10 +156,10 @@ func TestRunSpansExposeExplicitAgentIterationsWithoutInventingLoopBackEdges(t *t
 	now := time.Date(2026, 7, 18, 4, 0, 0, 0, time.UTC)
 	detail := RunDetail{
 		Run: RunSummary{ID: "run-1", TaskID: "task-1", Status: "succeeded", StartedAt: now, EndedAt: now.Add(9 * time.Second)},
-		Invocations: []Invocation{{
+		Model: ModelExecution{
 			ID: "inv-1", Status: "succeeded", CreatedAt: now.Add(time.Second), UpdatedAt: now.Add(8 * time.Second),
 			ContextManifest: execution.ContextManifest{MemoryChecked: true}, Usage: map[string]any{"model_calls": float64(3)},
-		}},
+		},
 		Effects: []Effect{
 			{ID: "intent-a", ToolID: "calendar", Status: "confirmed", CreatedAt: now.Add(3 * time.Second), UpdatedAt: now.Add(4 * time.Second)},
 			{ID: "intent-b", ToolID: "builtin.delegate", Status: "confirmed", CreatedAt: now.Add(3 * time.Second), UpdatedAt: now.Add(4 * time.Second)},
@@ -234,10 +234,10 @@ func TestSupersededTurnProjectsAttentionBoundaryWithoutCandidateCausality(t *tes
 	now := time.Date(2026, 7, 19, 14, 0, 0, 0, time.UTC)
 	detail := RunDetail{
 		Run: RunSummary{ID: "run-1", TaskID: "task-1", Status: "succeeded", StartedAt: now},
-		Invocations: []Invocation{{
+		Model: ModelExecution{
 			ID: "inv-1", Status: "succeeded", CreatedAt: now, UpdatedAt: now.Add(3 * time.Second),
 			ContextManifest: execution.ContextManifest{MemoryChecked: true},
-		}},
+		},
 		loopTrace: persistedRunTrace{ModelTurns: []persistedModelTurn{
 			{ID: "inv-1:turn:1", Ordinal: 1, Trigger: "initial_request", Status: "superseded", InputSequence: 10, StartedAt: now, EndedAt: now.Add(time.Second), Checkpoints: []string{"ready_for_model", "newer_user_input"}, FinishReason: "stop"},
 			{ID: "inv-1:turn:2", Ordinal: 2, Trigger: "user_input", Status: "succeeded", InputSequence: 11, StartedAt: now.Add(2 * time.Second), EndedAt: now.Add(3 * time.Second), Checkpoints: []string{"ready_for_model", "candidate_received"}, FinishReason: "stop"},
@@ -271,10 +271,10 @@ func TestInterruptedToolFrameProjectsSkippedSiblingBeforeAttentionBoundary(t *te
 	now := time.Date(2026, 7, 19, 14, 0, 0, 0, time.UTC)
 	detail := RunDetail{
 		Run: RunSummary{ID: "run-1", TaskID: "task-1", Status: "succeeded", StartedAt: now},
-		Invocations: []Invocation{{
+		Model: ModelExecution{
 			ID: "inv-1", Status: "succeeded", CreatedAt: now, UpdatedAt: now.Add(4 * time.Second),
 			ContextManifest: execution.ContextManifest{MemoryChecked: true},
-		}},
+		},
 		Effects: []Effect{{ID: "intent-1", ToolCallID: "call-1", ToolID: "builtin.web", Status: "confirmed", CreatedAt: now, UpdatedAt: now.Add(time.Second)}},
 		loopTrace: persistedRunTrace{
 			ModelTurns: []persistedModelTurn{
@@ -312,8 +312,8 @@ func TestCallExchangesExposeGovernedDetailsWithoutPromptsOrCredentials(t *testin
 	t.Parallel()
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	detail := RunDetail{
-		Run:         RunSummary{ID: "run-1", TaskID: "task-1", Status: "succeeded", StartedAt: now},
-		Invocations: []Invocation{{ID: "inv-1", Status: "succeeded", CreatedAt: now, UpdatedAt: now.Add(time.Second), ContextManifest: execution.ContextManifest{MemoryChecked: true}}},
+		Run:   RunSummary{ID: "run-1", TaskID: "task-1", Status: "succeeded", StartedAt: now},
+		Model: ModelExecution{ID: "inv-1", Status: "succeeded", CreatedAt: now, UpdatedAt: now.Add(time.Second), ContextManifest: execution.ContextManifest{MemoryChecked: true}},
 		Effects: []Effect{{
 			ID: "intent-1", ToolCallID: "call-1", ToolID: "builtin.web", Status: "confirmed",
 			PayloadRef: content.Ref{ObjectID: "payload"}, ResultRef: content.Ref{ObjectID: "result"}, CreatedAt: now, UpdatedAt: now.Add(time.Second),

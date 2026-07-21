@@ -153,7 +153,7 @@ func TestSystemPromptRequiresOneMinimalClarification(t *testing.T) {
 func TestSystemPromptStatesGovernedLearningWithoutCapabilityCases(t *testing.T) {
 	prompt := systemPrompt(identity.Snapshot{Soul: "stable soul"})
 	for _, required := range []string{
-		"governed Memory, linked user Feedback, Episodes, Eval, and guarded runtime-instruction experiments",
+		"governed Memory, linked user Feedback, Episodes, and Eval",
 		"cannot rewrite Soul, authority, code, or model weights",
 		"Never claim that evidence or Memory was stored, used, or learned from without its confirmed Tool observation",
 	} {
@@ -208,31 +208,32 @@ func TestSystemPromptAlwaysIncludesUnversionedSoulGuidedResponse(t *testing.T) {
 
 func TestAssembleRunPromptsKeepsStableAndEvaluationRolesSeparate(t *testing.T) {
 	observed := time.Date(2026, time.July, 20, 9, 30, 0, 0, time.FixedZone("Asia/Shanghai", 8*60*60))
+	snapshot := identity.Snapshot{Soul: "stable soul"}
+	catalog := "\n\n<available_skills>stable catalog</available_skills>"
 	prompts := assembleRunPrompts(
-		identity.Snapshot{Soul: "stable soul"},
-		"\n\n<available_skills>stable catalog</available_skills>",
-		"candidate experiment only",
+		snapshot,
+		catalog,
+		Experience{},
 		memory.Bundle{},
 		"web",
 		observed,
 	)
+	stablePrefix := systemPrompt(snapshot) + catalog
+	if !strings.HasPrefix(prompts.AgentSystem, stablePrefix) {
+		t.Fatalf("agent System lost reusable prefix: %s", prompts.AgentSystem)
+	}
 	skillIndex := strings.Index(prompts.AgentSystem, "<available_skills>")
-	if skillIndex < 0 {
+	runtimeIndex := strings.Index(prompts.AgentSystem, "<current_runtime_context>")
+	if skillIndex < 0 || runtimeIndex <= skillIndex {
 		t.Fatalf("agent stable prompt lost skill catalog: %s", prompts.AgentSystem)
 	}
-	for _, volatile := range []string{"Runtime improvement instruction", "<current_runtime_context>", "2026-07-20"} {
-		if strings.Contains(prompts.AgentSystem, volatile) {
-			t.Fatalf("agent stable prompt contains volatile layer %q: %s", volatile, prompts.AgentSystem)
+	for _, required := range []string{"<current_runtime_context>", "2026-07-20", "Source channel: web"} {
+		if !strings.Contains(prompts.AgentSystem, required) {
+			t.Fatalf("agent System is missing runtime fact %q: %s", required, prompts.AgentSystem)
 		}
 	}
-	dynamic := ""
-	for _, message := range prompts.DynamicContext {
-		dynamic += message.Content
-	}
-	evolutionIndex := strings.Index(dynamic, "<runtime_improvement>")
-	runtimeIndex := strings.Index(dynamic, "<current_runtime_context>")
-	if evolutionIndex < 0 || runtimeIndex <= evolutionIndex {
-		t.Fatalf("dynamic prompt layer order is unstable: evolution=%d runtime=%d", evolutionIndex, runtimeIndex)
+	if prompts.MemoryContext != nil || strings.Contains(prompts.AgentSystem, "<runtime_improvement>") {
+		t.Fatalf("ordinary prompt unexpectedly contains Memory or an experiment: %+v", prompts)
 	}
 	for _, forbidden := range []string{"<agent_operating_rules>", "<available_skills>", "Runtime improvement instruction"} {
 		if strings.Contains(prompts.JudgeContext, forbidden) {
@@ -246,25 +247,41 @@ func TestAssembleRunPromptsKeepsStableAndEvaluationRolesSeparate(t *testing.T) {
 	}
 }
 
-func TestAssembleRunPromptsKeepsRootSystemByteStableAcrossVolatileRuns(t *testing.T) {
+func TestAssembleRunPromptsKeepsReusablePrefixStableAcrossRuntimeChanges(t *testing.T) {
 	snapshot := identity.Snapshot{Soul: "stable soul"}
-	first := assembleRunPrompts(snapshot, "<available_skills>stable catalog</available_skills>", "experiment one", memory.Bundle{}, "web",
+	catalog := "<available_skills>stable catalog</available_skills>"
+	stablePrefix := systemPrompt(snapshot) + catalog
+	first := assembleRunPrompts(snapshot, catalog, Experience{}, memory.Bundle{}, "web",
 		time.Date(2026, time.July, 20, 9, 30, 1, 0, time.UTC))
-	second := assembleRunPrompts(snapshot, "<available_skills>stable catalog</available_skills>", "experiment two", memory.Bundle{
+	second := assembleRunPrompts(snapshot, catalog, Experience{}, memory.Bundle{
 		Entries: []memory.Entry{{Snapshot: memory.Snapshot{MemoryID: "memory-2", ClaimID: "claim-2", Status: memory.Supported}, Statement: "durable preference"}},
 	}, "lark", time.Date(2026, time.July, 21, 22, 45, 59, 0, time.UTC))
-	if first.AgentSystem != second.AgentSystem {
-		t.Fatalf("volatile run state changed root System:\nfirst=%s\nsecond=%s", first.AgentSystem, second.AgentSystem)
+	if !strings.HasPrefix(first.AgentSystem, stablePrefix) || !strings.HasPrefix(second.AgentSystem, stablePrefix) {
+		t.Fatalf("runtime changes invalidated the reusable System prefix")
 	}
-	firstDynamic, secondDynamic := "", ""
-	for _, message := range first.DynamicContext {
-		firstDynamic += message.Content
+	if first.AgentSystem == second.AgentSystem || !strings.Contains(second.AgentSystem, "Current local date: 2026-07-21") {
+		t.Fatalf("runtime System tail did not track the current Run")
 	}
-	for _, message := range second.DynamicContext {
-		secondDynamic += message.Content
+	if first.MemoryContext != nil || second.MemoryContext == nil || !strings.Contains(second.MemoryContext.Content, "durable preference") {
+		t.Fatalf("Memory was not kept in its separate message: first=%+v second=%+v", first.MemoryContext, second.MemoryContext)
 	}
-	if firstDynamic == secondDynamic || !strings.Contains(secondDynamic, "durable preference") || !strings.Contains(secondDynamic, "Current local date: 2026-07-21") {
-		t.Fatalf("volatile suffix did not track run evidence:\nfirst=%s\nsecond=%s", firstDynamic, secondDynamic)
+}
+
+func TestAssembleRunPromptsAddsVersionedExperienceAfterStablePrefix(t *testing.T) {
+	snapshot := identity.Snapshot{Soul: "stable soul"}
+	catalog := "<available_skills>stable catalog</available_skills>"
+	experience := Experience{ReleaseID: "experience-7", Version: 7, Text: "- Compare independent evidence before finalizing."}
+	prompts := assembleRunPrompts(snapshot, catalog, experience, memory.Bundle{}, "web",
+		time.Date(2026, time.July, 21, 9, 30, 0, 0, time.UTC))
+
+	stablePrefix := systemPrompt(snapshot) + catalog
+	experienceIndex := strings.Index(prompts.AgentSystem, `<eri_experience version="7">`)
+	runtimeIndex := strings.Index(prompts.AgentSystem, "<current_runtime_context>")
+	if !strings.HasPrefix(prompts.AgentSystem, stablePrefix) || experienceIndex < len(stablePrefix) || runtimeIndex <= experienceIndex {
+		t.Fatalf("Experience is not a separate versioned System section after the reusable prefix: %s", prompts.AgentSystem)
+	}
+	if !strings.Contains(prompts.AgentSystem, experience.Text) || strings.Contains(prompts.JudgeContext, experience.Text) {
+		t.Fatalf("Experience must guide generation without becoming the Judge rubric: %+v", prompts)
 	}
 }
 
@@ -272,7 +289,7 @@ func TestAssembleRunPromptsKeepsMemoryWorkflowOutOfJudgeContext(t *testing.T) {
 	prompts := assembleRunPrompts(
 		identity.Snapshot{Soul: "stable soul"},
 		"",
-		"",
+		Experience{},
 		memory.Bundle{
 			RetrievalID: "retrieval-1",
 			Entries: []memory.Entry{{
@@ -289,11 +306,10 @@ func TestAssembleRunPromptsKeepsMemoryWorkflowOutOfJudgeContext(t *testing.T) {
 		"web",
 		time.Date(2026, time.July, 20, 9, 30, 0, 0, time.UTC),
 	)
-	dynamic := ""
-	for _, message := range prompts.DynamicContext {
-		dynamic += message.Content
+	if prompts.MemoryContext == nil {
+		t.Fatal("Memory context is missing")
 	}
-	for _, prompt := range []string{dynamic, prompts.JudgeContext} {
+	for _, prompt := range []string{prompts.MemoryContext.Content, prompts.JudgeContext} {
 		if !strings.Contains(prompt, "The user prefers concise progress updates.") {
 			t.Fatalf("prompt lost relevant memory evidence: %s", prompt)
 		}
@@ -301,11 +317,38 @@ func TestAssembleRunPromptsKeepsMemoryWorkflowOutOfJudgeContext(t *testing.T) {
 	if strings.Contains(prompts.AgentSystem, "The user prefers concise progress updates.") || strings.Contains(prompts.AgentSystem, "operation=mark_used") {
 		t.Fatalf("stable Agent System contains dynamic Memory: %s", prompts.AgentSystem)
 	}
-	if !strings.Contains(dynamic, "operation=mark_used") {
-		t.Fatalf("agent dynamic context lost memory use workflow: %s", dynamic)
+	if strings.Contains(prompts.MemoryContext.Content, "operation=mark_used") || strings.Contains(prompts.MemoryContext.Content, "call builtin.memory") {
+		t.Fatalf("Memory evidence still carries a procedural mark-used instruction: %s", prompts.MemoryContext.Content)
 	}
 	if strings.Contains(prompts.JudgeContext, "operation=mark_used") || strings.Contains(prompts.JudgeContext, "call builtin.memory") {
 		t.Fatalf("Judge context inherited generation-only memory workflow: %s", prompts.JudgeContext)
+	}
+}
+
+func TestReplaceDeferredToolResultPreservesNativeToolFrame(t *testing.T) {
+	messages := []Message{
+		{Role: "user", Content: "Delegate the repository review."},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call-delegate", Name: "builtin_delegate", Arguments: json.RawMessage(`{}`)}}},
+		{Role: "tool", ToolCallID: "call-delegate", Content: `{"success":true,"result":{"deferred":{"id":"delegation-1"}}}`},
+	}
+	if err := replaceDeferredToolResult(messages, "call-delegate", "engineering_team", "completed", []byte(`{"summary":"verified"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateModelTranscript(messages); err != nil {
+		t.Fatalf("replaced deferred result broke the native Tool frame: %v", err)
+	}
+	if messages[2].Role != "tool" || messages[2].ToolCallID != "call-delegate" || !strings.Contains(messages[2].Content, `"kind":"subagent_result"`) {
+		t.Fatalf("unexpected resumed Tool result: %+v", messages[2])
+	}
+}
+
+func TestReplaceSystemOverlaySupersedesOlderControlOfSameKind(t *testing.T) {
+	messages := []Message{{Role: "user", Content: "continue"}}
+	messages = replaceSystemOverlay(messages, "runtime_control", "change strategy")
+	messages = replaceSystemOverlay(messages, "runtime_control", "synthesize now")
+	messages = replaceSystemOverlay(messages, "evaluation_feedback", "missing evidence")
+	if len(messages) != 3 || !strings.Contains(messages[1].Content, "synthesize now") || strings.Contains(messages[1].Content, "change strategy") {
+		t.Fatalf("replaceable overlays accumulated or lost the latest state: %+v", messages)
 	}
 }
 

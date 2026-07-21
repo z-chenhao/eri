@@ -44,7 +44,7 @@ func TestApprovalExpiryQueuesDurableContinuation(t *testing.T) {
 	}
 	expires := now.Add(-time.Minute)
 	if err := store.PauseForApproval(ctx, agent.ApprovalCommit{
-		TaskID: task.TaskID, RunID: task.RunID, InvocationID: task.InvocationID,
+		TaskID: task.TaskID, RunID: task.RunID,
 		ApprovalID: "expiry-approval", ArtifactID: "expiry-artifact", EvalID: "expiry-eval", DeliveryID: "expiry-delivery",
 		Intent: intent, ArtifactRef: testRef("expiry-artifact-ref", "hash-artifact"),
 		ContinuationRef: testRef("expiry-continuation", "hash-continuation"),

@@ -31,7 +31,7 @@ func (s *Store) loadEvolutionRelease(ctx context.Context, predicate, order strin
 	var refJSON, reviewRefJSON, created string
 	var activated, retired sql.NullString
 	query := `
-		SELECT id, version, status, instruction_ref_json, offline_review_ref_json,
+		SELECT id, version, status, experience_ref_json, offline_review_ref_json,
 			training_signal_count, holdout_signal_count, offline_score, baseline_score,
 			pass_count, fail_count, created_at, activated_at, retired_at
 		FROM evolution_releases WHERE ` + predicate + ` ORDER BY ` + order + ` LIMIT 1`
@@ -45,7 +45,7 @@ func (s *Store) loadEvolutionRelease(ctx context.Context, predicate, order strin
 	if err != nil {
 		return evolution.Release{}, false, err
 	}
-	if err := json.Unmarshal([]byte(refJSON), &release.InstructionRef); err != nil {
+	if err := json.Unmarshal([]byte(refJSON), &release.ExperienceRef); err != nil {
 		return evolution.Release{}, false, err
 	}
 	if err := json.Unmarshal([]byte(reviewRefJSON), &release.OfflineReviewRef); err != nil {
@@ -63,13 +63,14 @@ func (s *Store) loadEvolutionRelease(ctx context.Context, predicate, order strin
 
 func (s *Store) FeedbackEvolutionSignal(ctx context.Context, feedbackID string) (evolution.Signal, bool, error) {
 	var signal evolution.Signal
+	var sourceTaskID string
 	var kind feedback.Kind
 	var outcome feedback.OutcomeStatus
 	var refJSON, created string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, source_task_id, kind, outcome, statement_ref_json, created_at
 		FROM feedback_records WHERE id = ?`, feedbackID).
-		Scan(&signal.ID, &signal.TaskID, &kind, &outcome, &refJSON, &created)
+		Scan(&signal.ID, &sourceTaskID, &kind, &outcome, &refJSON, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return evolution.Signal{}, false, nil
 	}
@@ -103,20 +104,26 @@ func (s *Store) FeedbackEvolutionSignal(ctx context.Context, feedbackID string) 
 	default:
 		return evolution.Signal{}, false, fmt.Errorf("feedback %s has invalid kind %q", feedbackID, kind)
 	}
+	err = s.db.QueryRowContext(ctx, `
+		SELECT id FROM runs WHERE task_id = ? ORDER BY started_at DESC LIMIT 1`, sourceTaskID).Scan(&signal.RunID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return evolution.Signal{}, false, fmt.Errorf("feedback %s has no source run", feedbackID)
+		}
+		return evolution.Signal{}, false, err
+	}
 	var manifestJSON string
 	err = s.db.QueryRowContext(ctx, `
-		SELECT context_manifest_json FROM invocations
-		WHERE task_id = ? AND kind = 'model'
-		ORDER BY created_at DESC LIMIT 1`, signal.TaskID).Scan(&manifestJSON)
+		SELECT context_manifest_json FROM runs WHERE id = ?`, signal.RunID).Scan(&manifestJSON)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return evolution.Signal{}, false, err
 	}
 	if err == nil {
 		var manifest struct {
-			EvolutionReleaseID string `json:"evolution_release_id"`
+			ExperienceReleaseID string `json:"experience_release_id"`
 		}
 		if json.Unmarshal([]byte(manifestJSON), &manifest) == nil {
-			signal.ReleaseID = manifest.EvolutionReleaseID
+			signal.ReleaseID = manifest.ExperienceReleaseID
 		}
 	}
 	return signal, true, nil
@@ -136,9 +143,9 @@ func (s *Store) SaveEvolutionSignal(ctx context.Context, signal evolution.Signal
 		return err
 	}
 	result, err := tx.ExecContext(ctx, `
-		INSERT INTO evolution_signals(id, task_id, release_id, result, tier, findings_ref_json, created_at)
+		INSERT INTO evolution_signals(id, run_id, release_id, result, tier, findings_ref_json, created_at)
 		VALUES(?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO NOTHING`, signal.ID, signal.TaskID, signal.ReleaseID, signal.Result, signal.Tier, string(refJSON), formatTime(signal.CreatedAt))
+		ON CONFLICT(id) DO NOTHING`, signal.ID, signal.RunID, signal.ReleaseID, signal.Result, signal.Tier, string(refJSON), formatTime(signal.CreatedAt))
 	if err != nil {
 		return err
 	}
@@ -213,7 +220,7 @@ func (s *Store) SaveEvolutionSignal(ctx context.Context, signal evolution.Signal
 
 func (s *Store) RecentEvolutionSignals(ctx context.Context, limit int) ([]evolution.Signal, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, task_id, release_id, result, tier, findings_ref_json, created_at
+		SELECT id, run_id, release_id, result, tier, findings_ref_json, created_at
 		FROM evolution_signals WHERE result <> 'pass' ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -223,7 +230,7 @@ func (s *Store) RecentEvolutionSignals(ctx context.Context, limit int) ([]evolut
 	for rows.Next() {
 		var signal evolution.Signal
 		var refJSON, created string
-		if err := rows.Scan(&signal.ID, &signal.TaskID, &signal.ReleaseID, &signal.Result, &signal.Tier, &refJSON, &created); err != nil {
+		if err := rows.Scan(&signal.ID, &signal.RunID, &signal.ReleaseID, &signal.Result, &signal.Tier, &refJSON, &created); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(refJSON), &signal.FindingsRef); err != nil {
@@ -239,7 +246,7 @@ func (s *Store) RecentEvolutionSignals(ctx context.Context, limit int) ([]evolut
 }
 
 func (s *Store) StartEvolutionCanary(ctx context.Context, release evolution.Release, sourceKey string) (evolution.Release, bool, error) {
-	refJSON, err := json.Marshal(release.InstructionRef)
+	refJSON, err := json.Marshal(release.ExperienceRef)
 	if err != nil {
 		return evolution.Release{}, false, err
 	}
@@ -271,7 +278,7 @@ func (s *Store) StartEvolutionCanary(ctx context.Context, release evolution.Rele
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) + 1 FROM evolution_releases`).Scan(&release.Version); err != nil {
 		return evolution.Release{}, false, err
 	}
-	if err := insertContentRef(ctx, tx, release.InstructionRef, release.CreatedAt); err != nil {
+	if err := insertContentRef(ctx, tx, release.ExperienceRef, release.CreatedAt); err != nil {
 		return evolution.Release{}, false, err
 	}
 	if err := insertContentRef(ctx, tx, release.OfflineReviewRef, release.CreatedAt); err != nil {
@@ -279,7 +286,7 @@ func (s *Store) StartEvolutionCanary(ctx context.Context, release evolution.Rele
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO evolution_releases(
-			id, version, status, instruction_ref_json, offline_review_ref_json, source_key,
+			id, version, status, experience_ref_json, offline_review_ref_json, source_key,
 			training_signal_count, holdout_signal_count, offline_score, baseline_score, created_at, activated_at)
 		VALUES(?, ?, 'canary', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		release.ID, release.Version, string(refJSON), string(reviewRefJSON), sourceKey,
@@ -301,7 +308,7 @@ func (s *Store) StartEvolutionCanary(ctx context.Context, release evolution.Rele
 
 func (s *Store) ListEvolutionReleases(ctx context.Context, limit int) ([]evolution.Release, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, version, status, instruction_ref_json, offline_review_ref_json,
+		SELECT id, version, status, experience_ref_json, offline_review_ref_json,
 			training_signal_count, holdout_signal_count, offline_score, baseline_score,
 			pass_count, fail_count, created_at, activated_at, retired_at
 		FROM evolution_releases ORDER BY version DESC LIMIT ?`, limit)
@@ -319,7 +326,7 @@ func (s *Store) ListEvolutionReleases(ctx context.Context, limit int) ([]evoluti
 			&release.PassCount, &release.FailCount, &created, &activated, &retired); err != nil {
 			return nil, err
 		}
-		if err := json.Unmarshal([]byte(refJSON), &release.InstructionRef); err != nil {
+		if err := json.Unmarshal([]byte(refJSON), &release.ExperienceRef); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(reviewRefJSON), &release.OfflineReviewRef); err != nil {

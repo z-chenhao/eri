@@ -22,42 +22,27 @@ func (s *Store) BuildEpisodeManifest(ctx context.Context, taskID string) (episod
 		return episode.Manifest{}, fmt.Errorf("task is not terminal")
 	}
 	ids := []string{taskID}
-	runRows, err := s.db.QueryContext(ctx, `SELECT id, status, soul_version, started_at, COALESCE(ended_at, '') FROM runs WHERE task_id = ? ORDER BY started_at`, taskID)
+	runRows, err := s.db.QueryContext(ctx, `
+		SELECT id, status, model_status, soul_version, target, context_manifest_json, COALESCE(usage_json, '{}'),
+			COALESCE(error_code, ''), started_at, COALESCE(NULLIF(updated_at, ''), started_at), COALESCE(ended_at, '')
+		FROM runs WHERE task_id = ? ORDER BY started_at`, taskID)
 	if err != nil {
 		return episode.Manifest{}, err
 	}
 	for runRows.Next() {
-		var id, status, soul, started, ended string
-		if err := runRows.Scan(&id, &status, &soul, &started, &ended); err != nil {
+		var id, status, modelStatus, soul, target, contextJSON, usageJSON, errorCode, started, updated, ended string
+		if err := runRows.Scan(&id, &status, &modelStatus, &soul, &target, &contextJSON, &usageJSON, &errorCode, &started, &updated, &ended); err != nil {
 			runRows.Close()
 			return episode.Manifest{}, err
 		}
-		manifest.Runs = append(manifest.Runs, map[string]any{"id": id, "status": status, "soul_version": soul, "started_at": started, "ended_at": ended})
-		ids = append(ids, id)
-	}
-	if err := runRows.Close(); err != nil {
-		return episode.Manifest{}, err
-	}
-	invocationRows, err := s.db.QueryContext(ctx, `
-		SELECT id, run_id, kind, status, target, context_manifest_json, COALESCE(usage_json, '{}'), COALESCE(error_code, ''), created_at, updated_at
-		FROM invocations WHERE task_id = ? ORDER BY created_at`, taskID)
-	if err != nil {
-		return episode.Manifest{}, err
-	}
-	for invocationRows.Next() {
-		var id, runID, kind, status, target, contextJSON, usageJSON, errorCode, created, updated string
-		if err := invocationRows.Scan(&id, &runID, &kind, &status, &target, &contextJSON, &usageJSON, &errorCode, &created, &updated); err != nil {
-			invocationRows.Close()
-			return episode.Manifest{}, err
-		}
-		manifest.Invocations = append(manifest.Invocations, map[string]any{
-			"id": id, "run_id": runID, "kind": kind, "status": status, "target": target,
+		manifest.Runs = append(manifest.Runs, map[string]any{
+			"id": id, "status": status, "model_status": modelStatus, "soul_version": soul, "target": target,
 			"context_manifest": decodeObject(contextJSON), "usage": decodeObject(usageJSON), "error_code": errorCode,
-			"created_at": created, "updated_at": updated, "replay": "simulate",
+			"started_at": started, "updated_at": updated, "ended_at": ended, "replay": "simulate",
 		})
 		ids = append(ids, id)
 	}
-	if err := invocationRows.Close(); err != nil {
+	if err := runRows.Close(); err != nil {
 		return episode.Manifest{}, err
 	}
 	artifactRows, err := s.db.QueryContext(ctx, `

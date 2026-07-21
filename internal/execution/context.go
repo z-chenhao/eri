@@ -51,8 +51,8 @@ type RuntimeCompaction struct {
 	SummarizedMessages int `json:"summarized_messages"`
 }
 
-// TaskCapsule identifies the durable Runtime task represented in one model
-// invocation. The objective body remains in the governed Content Store; this
+// TaskCapsule identifies the durable Runtime task represented in one Agent
+// Run. The objective body remains in the governed Content Store; this
 // manifest records only safe provenance and scheduling facts.
 type TaskCapsule struct {
 	TaskID              string    `json:"task_id"`
@@ -68,35 +68,35 @@ type TaskCapsule struct {
 }
 
 // ContextManifest is the durable declaration of context assembled for one
-// invocation. IDs are stored instead of secret or private payload bodies.
+// Run. IDs are stored instead of secret or private payload bodies.
 type ContextManifest struct {
-	IdentityID              string              `json:"identity_id"`
-	SoulVersion             string              `json:"soul_version"`
-	MemoryRetrievalID       string              `json:"memory_retrieval_id,omitempty"`
-	RetrievedMemoryIDs      []string            `json:"retrieved_memory_ids,omitempty"`
-	MemoryIDs               []string            `json:"memory"`
-	AppliedMemoryIDs        []string            `json:"applied_memory_ids,omitempty"`
-	MemoryChecked           bool                `json:"memory_checked"`
-	SkillIDs                []string            `json:"skills"`
-	ToolIDs                 []string            `json:"tools"`
-	ExternalDataSent        bool                `json:"external_data_sent"`
-	ResponseProfile         string              `json:"response_profile"`
-	SourceChannel           string              `json:"source_channel,omitempty"`
-	RuntimeObservedAt       time.Time           `json:"runtime_observed_at,omitempty"`
-	RuntimeTimezone         string              `json:"runtime_timezone,omitempty"`
-	EvolutionReleaseID      string              `json:"evolution_release_id,omitempty"`
-	EvolutionReleaseVersion int                 `json:"evolution_release_version,omitempty"`
-	ProviderCapabilities    ModelCapabilities   `json:"provider_capabilities"`
-	MessageIDs              []string            `json:"message_ids,omitempty"`
-	ConversationSequence    int64               `json:"conversation_sequence,omitempty"`
-	AttachmentIDs           []string            `json:"attachment_ids,omitempty"`
-	ContextWindowTokens     int                 `json:"context_window_tokens,omitempty"`
-	OutputReservedTokens    int                 `json:"output_reserved_tokens,omitempty"`
-	ContextInputLimitTokens int                 `json:"context_input_limit_tokens,omitempty"`
-	EstimatedInputTokens    int                 `json:"estimated_input_tokens,omitempty"`
-	ExternalData            *ExternalData       `json:"external_data,omitempty"`
-	Compression             Compression         `json:"compression"`
-	RuntimeCompactions      []RuntimeCompaction `json:"runtime_compactions,omitempty"`
-	ExternalMemoryIDs       []string            `json:"external_memory_ids,omitempty"`
-	CurrentTask             *TaskCapsule        `json:"current_task,omitempty"`
+	IdentityID               string              `json:"identity_id"`
+	SoulVersion              string              `json:"soul_version"`
+	MemoryRetrievalID        string              `json:"memory_retrieval_id,omitempty"`
+	RetrievedMemoryIDs       []string            `json:"retrieved_memory_ids,omitempty"`
+	MemoryIDs                []string            `json:"memory"`
+	AppliedMemoryIDs         []string            `json:"applied_memory_ids,omitempty"`
+	MemoryChecked            bool                `json:"memory_checked"`
+	SkillIDs                 []string            `json:"skills"`
+	ToolIDs                  []string            `json:"tools"`
+	ExternalDataSent         bool                `json:"external_data_sent"`
+	ResponseProfile          string              `json:"response_profile"`
+	SourceChannel            string              `json:"source_channel,omitempty"`
+	RuntimeObservedAt        time.Time           `json:"runtime_observed_at,omitempty"`
+	RuntimeTimezone          string              `json:"runtime_timezone,omitempty"`
+	ExperienceReleaseID      string              `json:"experience_release_id,omitempty"`
+	ExperienceReleaseVersion int                 `json:"experience_release_version,omitempty"`
+	ProviderCapabilities     ModelCapabilities   `json:"provider_capabilities"`
+	MessageIDs               []string            `json:"message_ids,omitempty"`
+	ConversationSequence     int64               `json:"conversation_sequence,omitempty"`
+	AttachmentIDs            []string            `json:"attachment_ids,omitempty"`
+	ContextWindowTokens      int                 `json:"context_window_tokens,omitempty"`
+	OutputReservedTokens     int                 `json:"output_reserved_tokens,omitempty"`
+	ContextInputLimitTokens  int                 `json:"context_input_limit_tokens,omitempty"`
+	EstimatedInputTokens     int                 `json:"estimated_input_tokens,omitempty"`
+	ExternalData             *ExternalData       `json:"external_data,omitempty"`
+	Compression              Compression         `json:"compression"`
+	RuntimeCompactions       []RuntimeCompaction `json:"runtime_compactions,omitempty"`
+	ExternalMemoryIDs        []string            `json:"external_memory_ids,omitempty"`
+	CurrentTask              *TaskCapsule        `json:"current_task,omitempty"`
 }

@@ -101,8 +101,8 @@ func TestTaskRetryRejectsPreviouslyDispatchedOrUnknownEffects(t *testing.T) {
 		 VALUES('interaction', 'conversation', 'unsafe-task', 'inbound', 'user', 'message', 'cli', '{}', '` + now + `')`,
 		`INSERT INTO tasks(id, conversation_id, source_interaction_id, source_channel, status, terminal_status, version, created_at, updated_at)
 		 VALUES('unsafe-task', 'conversation', 'interaction', 'cli', 'failed', 'failed', 1, '` + now + `', '` + now + `')`,
-		`INSERT INTO runs(id, task_id, status, soul_version, started_at, ended_at)
-		 VALUES('run', 'unsafe-task', 'failed', 'soul', '` + now + `', '` + now + `')`,
+		`INSERT INTO runs(id, task_id, status, model_status, soul_version, target, context_manifest_json, started_at, updated_at, ended_at)
+		 VALUES('run', 'unsafe-task', 'failed', 'failed', 'soul', 'test:model', '{}', '` + now + `', '` + now + `', '` + now + `')`,
 		`INSERT INTO effect_intents(id, task_id, run_id, invocation_id, tool_call_id, tool_id, tool_version, effect_class, target, parameters_hash, payload_ref_json, idempotency_key, control_level, reconciliation_strategy, status, created_at, updated_at)
 		 VALUES('effect', 'unsafe-task', 'run', 'invocation', 'call', 'mcp.email.send', '1', 'communication', 'alice@example.com', 'hash', '{}', 'key', 'ordinary_confirm', 'provider_receipt', 'unknown', '` + now + `', '` + now + `')`,
 	} {

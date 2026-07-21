@@ -94,7 +94,7 @@ func TestDaemonProviderFailureIsDiagnosableWithoutFixedAssistantReplyOrSecretLea
 		t.Fatal(err)
 	}
 	logText := string(logBody)
-	for _, required := range []string{`"msg":"model call finished"`, `"error_code":"operation_failed"`, `"error":"provider unavailable: token=[REDACTED]"`, `"msg":"invocation failed"`, `"error_code":"model_unavailable"`, `"task_id":"` + sent.TaskID + `"`} {
+	for _, required := range []string{`"msg":"model call finished"`, `"error_code":"operation_failed"`, `"error":"provider unavailable: token=[REDACTED]"`, `"msg":"run failed"`, `"error_code":"model_unavailable"`, `"task_id":"` + sent.TaskID + `"`} {
 		if !strings.Contains(logText, required) {
 			t.Fatalf("log is missing %q: %s", required, logText)
 		}

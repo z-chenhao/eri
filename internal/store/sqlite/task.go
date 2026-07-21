@@ -93,13 +93,7 @@ func (s *Store) RequestTaskCancel(ctx context.Context, id string) (assistanttask
 			wait_reason = NULL, lease_owner = NULL, lease_until = NULL, version = version + 1, updated_at = ? WHERE id = ?`, formatTime(now), id); err != nil {
 			return assistanttask.CancelResult{}, err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE runs SET status = 'canceled', ended_at = ? WHERE task_id = ? AND status = 'active'`, formatTime(now), id); err != nil {
-			return assistanttask.CancelResult{}, err
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE steps SET status = 'canceled', updated_at = ? WHERE task_id = ? AND status IN ('running', 'waiting', 'planned')`, formatTime(now), id); err != nil {
-			return assistanttask.CancelResult{}, err
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE invocations SET status = 'canceled', error_code = 'user_canceled', updated_at = ? WHERE task_id = ? AND status = 'planned'`, formatTime(now), id); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE runs SET status = 'canceled', model_status = 'canceled', error_code = 'user_canceled', updated_at = ?, ended_at = ? WHERE task_id = ? AND status = 'active'`, formatTime(now), formatTime(now), id); err != nil {
 			return assistanttask.CancelResult{}, err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE internal_outbox SET status = 'done', updated_at = ? WHERE aggregate_id = ? AND kind IN ('task.wake', 'approval.resume') AND status = 'pending'`, formatTime(now), id); err != nil {
@@ -189,7 +183,7 @@ func (s *Store) TaskCancelRequested(ctx context.Context, id string) (bool, error
 	return requested == 1, err
 }
 
-func (s *Store) CommitTaskCancellation(ctx context.Context, taskID, runID, invocationID string, traceRef content.Ref, usage agent.Usage) error {
+func (s *Store) CommitTaskCancellation(ctx context.Context, taskID, runID string, traceRef content.Ref, usage agent.Usage) error {
 	now := time.Now().UTC()
 	encodedTrace, err := json.Marshal(traceRef)
 	if err != nil {
@@ -207,13 +201,7 @@ func (s *Store) CommitTaskCancellation(ctx context.Context, taskID, runID, invoc
 	if err := insertContentRef(ctx, tx, traceRef, now); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE invocations SET status = 'canceled', usage_json = ?, error_code = 'user_canceled', updated_at = ? WHERE id = ? AND status IN ('planned', 'dispatched')`, string(usageJSON), formatTime(now), invocationID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE steps SET status = 'canceled', updated_at = ? WHERE run_id = ? AND status IN ('running', 'waiting')`, formatTime(now), runID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE runs SET status = 'canceled', ended_at = ? WHERE id = ? AND status = 'active'`, formatTime(now), runID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET status = 'canceled', model_status = 'canceled', usage_json = ?, error_code = 'user_canceled', updated_at = ?, ended_at = ? WHERE id = ? AND status = 'active'`, string(usageJSON), formatTime(now), formatTime(now), runID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET status = 'canceled', terminal_status = 'canceled', wait_reason = NULL,
@@ -223,7 +211,7 @@ func (s *Store) CommitTaskCancellation(ctx context.Context, taskID, runID, invoc
 	if _, err := tx.ExecContext(ctx, `UPDATE agent_checkpoints SET status = 'completed', updated_at = ? WHERE task_id = ? AND status = 'active'`, formatTime(now), taskID); err != nil {
 		return err
 	}
-	if err := appendEvent(ctx, tx, "invocation", invocationID, "invocation.canceled", map[string]any{"run_id": runID, "trace_ref": encodedTrace}, now); err != nil {
+	if err := appendEvent(ctx, tx, "run", runID, "run.canceled", map[string]any{"trace_ref": encodedTrace}, now); err != nil {
 		return err
 	}
 	if err := appendEvent(ctx, tx, "task", taskID, "task.canceled", map[string]any{"run_id": runID}, now); err != nil {

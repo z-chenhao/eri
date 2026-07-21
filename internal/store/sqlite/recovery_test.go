@@ -25,7 +25,7 @@ func TestRuntimeRecoveryReclaimsSameRunAndInvocation(t *testing.T) {
 	if err != nil || !claimed {
 		t.Fatalf("first claim = %+v, claimed = %v, err = %v", first, claimed, err)
 	}
-	if err := store.MarkInvocationDispatched(ctx, first.InvocationID); err != nil {
+	if err := store.MarkRunDispatched(ctx, first.RunID); err != nil {
 		t.Fatal(err)
 	}
 	checkpointRef := testRef("agent-checkpoint", "agent-checkpoint-hash")
@@ -47,13 +47,13 @@ func TestRuntimeRecoveryReclaimsSameRunAndInvocation(t *testing.T) {
 	if err != nil || !claimed {
 		t.Fatalf("second claim = %+v, claimed = %v, err = %v", second, claimed, err)
 	}
-	if second.RunID != first.RunID || second.InvocationID != first.InvocationID {
+	if second.RunID != first.RunID {
 		t.Fatalf("recovery created new execution identity: first=%+v second=%+v", first, second)
 	}
 	if second.CheckpointPhase != "model_received" || second.CheckpointRef.ObjectID != checkpointRef.ObjectID {
 		t.Fatalf("recovery lost agent checkpoint: %+v", second)
 	}
-	if err := store.MarkInvocationDispatched(ctx, second.InvocationID); err != nil {
+	if err := store.MarkRunDispatched(ctx, second.RunID); err != nil {
 		t.Fatalf("idempotent dispatch marker failed: %v", err)
 	}
 	var runCount int

@@ -33,8 +33,8 @@ func TestCorrectiveFeedbackLinksDeliveryInvalidatesOldDerivedDataAndCandidatesRe
 		 VALUES('source-task', 'conversation', 'source-in', 'test', 'completed', 'completed', 1, '` + now + `', '` + now + `')`,
 		`INSERT INTO tasks(id, conversation_id, source_interaction_id, source_channel, status, terminal_status, version, created_at, updated_at)
 		 VALUES('feedback-task', 'conversation', 'feedback-in', 'test', 'running', 'completed', 1, '` + now + `', '` + now + `')`,
-		`INSERT INTO runs(id, task_id, status, soul_version, started_at, ended_at)
-		 VALUES('source-run', 'source-task', 'succeeded', 'soul', '` + now + `', '` + now + `')`,
+		`INSERT INTO runs(id, task_id, status, model_status, soul_version, target, context_manifest_json, started_at, updated_at, ended_at)
+		 VALUES('source-run', 'source-task', 'succeeded', 'succeeded', 'soul', 'test:model', '{}', '` + now + `', '` + now + `', '` + now + `')`,
 		`INSERT INTO artifacts(id, task_id, run_id, version, kind, content_ref_json, status, trace_ref_json, created_at)
 		 VALUES('source-artifact', 'source-task', 'source-run', 1, 'reply', '{}', 'delivered', '{}', '` + now + `')`,
 		`INSERT INTO deliveries(id, task_id, artifact_id, target_channel, status, receipt, idempotency_key, terminal_status, created_at, updated_at)
@@ -128,8 +128,8 @@ func TestCorrectiveFeedbackBeforeEpisodeBuildKeepsSourceEpisodeInvalidated(t *te
 		`INSERT INTO tasks(id, conversation_id, source_interaction_id, source_channel, status, terminal_status, version, created_at, updated_at)
 		 VALUES('source-task', 'conversation', 'source-in', 'test', 'completed', 'completed', 1, '` + now + `', '` + now + `'),
 		       ('feedback-task', 'conversation', 'feedback-in', 'test', 'running', 'completed', 1, '` + now + `', '` + now + `')`,
-		`INSERT INTO runs(id, task_id, status, soul_version, started_at, ended_at)
-		 VALUES('source-run', 'source-task', 'succeeded', 'soul', '` + now + `', '` + now + `')`,
+		`INSERT INTO runs(id, task_id, status, model_status, soul_version, target, context_manifest_json, started_at, updated_at, ended_at)
+		 VALUES('source-run', 'source-task', 'succeeded', 'succeeded', 'soul', 'test:model', '{}', '` + now + `', '` + now + `', '` + now + `')`,
 		`INSERT INTO artifacts(id, task_id, run_id, version, kind, content_ref_json, status, trace_ref_json, created_at)
 		 VALUES('source-artifact', 'source-task', 'source-run', 1, 'reply', '{}', 'delivered', '{}', '` + now + `')`,
 		`INSERT INTO deliveries(id, task_id, artifact_id, target_channel, status, receipt, idempotency_key, terminal_status, created_at, updated_at)
@@ -193,8 +193,8 @@ func TestFeedbackCannotReferenceDeliveryOutsideItsConversation(t *testing.T) {
 		`INSERT INTO tasks(id, conversation_id, source_interaction_id, source_channel, status, terminal_status, version, created_at, updated_at)
 		 VALUES('feedback-task', 'one', 'in-one', 'test', 'running', 'completed', 1, '` + now + `', '` + now + `'),
 		       ('foreign-task', 'two', 'in-two', 'test', 'completed', 'completed', 1, '` + now + `', '` + now + `')`,
-		`INSERT INTO runs(id, task_id, status, soul_version, started_at, ended_at)
-		 VALUES('foreign-run', 'foreign-task', 'succeeded', 'soul', '` + now + `', '` + now + `')`,
+		`INSERT INTO runs(id, task_id, status, model_status, soul_version, target, context_manifest_json, started_at, updated_at, ended_at)
+		 VALUES('foreign-run', 'foreign-task', 'succeeded', 'succeeded', 'soul', 'test:model', '{}', '` + now + `', '` + now + `', '` + now + `')`,
 		`INSERT INTO artifacts(id, task_id, run_id, version, kind, content_ref_json, status, trace_ref_json, created_at)
 		 VALUES('foreign-artifact', 'foreign-task', 'foreign-run', 1, 'reply', '{}', 'delivered', '{}', '` + now + `')`,
 		`INSERT INTO deliveries(id, task_id, artifact_id, target_channel, status, receipt, idempotency_key, terminal_status, created_at, updated_at)

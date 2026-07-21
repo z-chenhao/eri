@@ -46,7 +46,7 @@ var schemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS context_checkpoints (
 		id TEXT PRIMARY KEY,
 		task_id TEXT NOT NULL REFERENCES tasks(id),
-		invocation_id TEXT NOT NULL REFERENCES invocations(id),
+		run_id TEXT NOT NULL REFERENCES runs(id),
 		summary_ref_json TEXT NOT NULL,
 		source_ids_json TEXT NOT NULL,
 		first_kept_sequence INTEGER NOT NULL,
@@ -61,7 +61,7 @@ var schemaStatements = []string{
 		task_id TEXT NOT NULL REFERENCES tasks(id),
 		run_id TEXT NOT NULL REFERENCES runs(id),
 		parent_intent_id TEXT REFERENCES effect_intents(id),
-		invocation_id TEXT NOT NULL REFERENCES invocations(id),
+		execution_id TEXT NOT NULL,
 		phase TEXT NOT NULL CHECK(phase IN ('ready_for_model', 'model_received', 'candidate_received')),
 		state_ref_json TEXT NOT NULL,
 		status TEXT NOT NULL CHECK(status IN ('active', 'superseded', 'completed')),
@@ -105,32 +105,15 @@ var schemaStatements = []string{
 		id TEXT PRIMARY KEY,
 		task_id TEXT NOT NULL REFERENCES tasks(id),
 		status TEXT NOT NULL CHECK(status IN ('active', 'succeeded', 'failed', 'canceled')),
+		model_status TEXT NOT NULL CHECK(model_status IN ('planned', 'dispatched', 'succeeded', 'failed', 'canceled', 'unknown')),
 		soul_version TEXT NOT NULL,
-		started_at TEXT NOT NULL,
-		ended_at TEXT
-	)`,
-	`CREATE TABLE IF NOT EXISTS steps (
-		id TEXT PRIMARY KEY,
-		run_id TEXT NOT NULL REFERENCES runs(id),
-		task_id TEXT NOT NULL REFERENCES tasks(id),
-		kind TEXT NOT NULL,
-		status TEXT NOT NULL,
-		created_at TEXT NOT NULL,
-		updated_at TEXT NOT NULL
-	)`,
-	`CREATE TABLE IF NOT EXISTS invocations (
-		id TEXT PRIMARY KEY,
-		run_id TEXT NOT NULL REFERENCES runs(id),
-		task_id TEXT NOT NULL REFERENCES tasks(id),
-		step_id TEXT NOT NULL REFERENCES steps(id),
-		kind TEXT NOT NULL,
-		status TEXT NOT NULL CHECK(status IN ('planned', 'dispatched', 'succeeded', 'failed', 'canceled', 'unknown')),
 		target TEXT NOT NULL,
 		context_manifest_json TEXT NOT NULL,
 		usage_json TEXT,
 		error_code TEXT,
-		created_at TEXT NOT NULL,
-		updated_at TEXT NOT NULL
+		started_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		ended_at TEXT
 	)`,
 	`CREATE TABLE IF NOT EXISTS artifacts (
 		id TEXT PRIMARY KEY,
@@ -308,8 +291,8 @@ var schemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS memory_associations_right ON memory_associations(right_memory_id, weight)`,
 	`CREATE TABLE IF NOT EXISTS memory_retrievals (
 		id TEXT PRIMARY KEY,
-		task_id TEXT NOT NULL REFERENCES tasks(id),
-		invocation_id TEXT NOT NULL REFERENCES invocations(id),
+		run_id TEXT NOT NULL REFERENCES runs(id),
+		source_interaction_id TEXT NOT NULL REFERENCES interactions(id),
 		query_key TEXT NOT NULL,
 		created_at TEXT NOT NULL
 	)`,
@@ -418,7 +401,7 @@ var schemaStatements = []string{
 		id TEXT PRIMARY KEY,
 		version INTEGER NOT NULL UNIQUE,
 		status TEXT NOT NULL CHECK(status IN ('canary', 'active', 'retired')),
-		instruction_ref_json TEXT NOT NULL,
+		experience_ref_json TEXT NOT NULL,
 		offline_review_ref_json TEXT NOT NULL,
 		source_key TEXT NOT NULL UNIQUE,
 		training_signal_count INTEGER NOT NULL,
@@ -435,7 +418,7 @@ var schemaStatements = []string{
 	`CREATE UNIQUE INDEX IF NOT EXISTS evolution_one_active ON evolution_releases(status) WHERE status = 'active'`,
 	`CREATE TABLE IF NOT EXISTS evolution_signals (
 		id TEXT PRIMARY KEY,
-		task_id TEXT NOT NULL REFERENCES tasks(id),
+		run_id TEXT NOT NULL REFERENCES runs(id),
 		release_id TEXT NOT NULL DEFAULT '',
 		result TEXT NOT NULL CHECK(result IN ('pass', 'repair', 'hold', 'escalate')),
 		tier TEXT NOT NULL,

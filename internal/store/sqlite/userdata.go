@@ -16,7 +16,7 @@ import (
 // exportTables is deliberately explicit. Runtime leases and outbox mechanics
 // are not user data and are excluded from the portable package.
 var exportTables = []string{
-	"conversations", "interactions", "channel_messages", "attachments", "tasks", "runs", "steps", "invocations", "context_checkpoints", "agent_checkpoints",
+	"conversations", "interactions", "channel_messages", "attachments", "tasks", "runs", "context_checkpoints", "agent_checkpoints",
 	"artifacts", "eval_records", "artifact_attachments", "deliveries", "effect_intents", "subagent_runs",
 	"memory_claims", "memory_evidence", "memory_beliefs", "memory_items", "memory_terms", "memory_associations", "memory_retrievals", "memory_retrieval_items", "memory_delete_jobs",
 	"commitments", "commitment_fires", "model_budget_usage", "episodes", "dataset_candidates",
@@ -192,7 +192,7 @@ func (s *Store) CommitUserDataErasure(ctx context.Context, jobID string, objectC
 	// Dependents precede parents so foreign-key enforcement remains enabled.
 	for _, table := range []string{
 		"evolution_signals", "evolution_releases", "dataset_snapshot_items", "dataset_snapshots", "dataset_candidates", "episodes", "feedback_records", "artifact_attachments", "deliveries", "eval_records", "artifacts",
-		"attachments", "channel_messages", "capability_grants", "approvals", "subagent_runs", "effect_intents", "agent_checkpoints", "context_checkpoints", "memory_retrieval_items", "memory_retrievals", "invocations", "steps", "runs",
+		"attachments", "channel_messages", "capability_grants", "approvals", "subagent_runs", "effect_intents", "agent_checkpoints", "context_checkpoints", "memory_retrieval_items", "memory_retrievals", "runs",
 		"commitment_fires", "commitments", "memory_delete_jobs", "memory_associations", "memory_semantic_index", "memory_terms", "memory_items",
 		"memory_beliefs", "memory_evidence", "memory_claims", "model_budget_usage", "events",
 		"conversation_introductions", "interactions", "tasks", "conversations", "content_objects",

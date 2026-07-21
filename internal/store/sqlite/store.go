@@ -303,8 +303,8 @@ func (s *Store) createInbound(ctx context.Context, sourceChannel string, externa
 			WHERE replied.channel = ? AND replied.external_message_id = ?
 				AND t.conversation_id = ? AND t.cancel_requested = 0 AND t.status = 'running'
 				AND EXISTS (
-					SELECT 1 FROM invocations i
-					WHERE i.task_id = t.id AND i.kind = 'model' AND i.status = 'dispatched'
+					SELECT 1 FROM runs r
+					WHERE r.task_id = t.id AND r.model_status = 'dispatched'
 				)
 			LIMIT 1`, sourceChannel, external.ReplyToMessageID, channel.ConversationID).Scan(&activeTaskID)
 	}
@@ -314,8 +314,8 @@ func (s *Store) createInbound(ctx context.Context, sourceChannel string, externa
 			FROM tasks t
 			WHERE t.conversation_id = ? AND t.cancel_requested = 0 AND t.status = 'running'
 				AND EXISTS (
-					SELECT 1 FROM invocations i
-					WHERE i.task_id = t.id AND i.kind = 'model' AND i.status = 'dispatched'
+					SELECT 1 FROM runs r
+					WHERE r.task_id = t.id AND r.model_status = 'dispatched'
 				)
 				AND COALESCE((
 					SELECT MAX(own.sequence) FROM interactions own
@@ -734,18 +734,15 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 	if count == 0 {
 		return agent.TaskContext{}, false, nil
 	}
-	var runID, invocationID string
+	var runID string
 	if recovering {
 		err = tx.QueryRowContext(ctx, `
-			SELECT r.id, i.id FROM runs r JOIN invocations i ON i.run_id = r.id AND i.kind = 'model'
-			WHERE r.task_id = ? AND r.status = 'active' ORDER BY i.created_at DESC LIMIT 1`, taskID).Scan(&runID, &invocationID)
+			SELECT id FROM runs
+			WHERE task_id = ? AND status = 'active' ORDER BY started_at DESC LIMIT 1`, taskID).Scan(&runID)
 		if err != nil {
 			return agent.TaskContext{}, false, fmt.Errorf("recover active run: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE steps SET status = 'running', updated_at = ? WHERE run_id = ? AND status IN ('running', 'waiting')`, formatTime(now), runID); err != nil {
-			return agent.TaskContext{}, false, err
-		}
-		if err := appendEvent(ctx, tx, "task", taskID, "task.recovered", map[string]any{"run_id": runID, "invocation_id": invocationID}, now); err != nil {
+		if err := appendEvent(ctx, tx, "task", taskID, "task.recovered", map[string]any{"run_id": runID}, now); err != nil {
 			return agent.TaskContext{}, false, err
 		}
 	} else {
@@ -753,29 +750,15 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 		if err != nil {
 			return agent.TaskContext{}, false, err
 		}
-		stepID, err := identifier.New()
-		if err != nil {
-			return agent.TaskContext{}, false, err
-		}
-		invocationID, err = identifier.New()
-		if err != nil {
-			return agent.TaskContext{}, false, err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO runs(id, task_id, status, soul_version, started_at) VALUES(?, ?, 'active', ?, ?)`, runID, taskID, soulVersion, formatTime(now)); err != nil {
-			return agent.TaskContext{}, false, err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO steps(id, run_id, task_id, kind, status, created_at, updated_at) VALUES(?, ?, ?, 'model', 'running', ?, ?)`, stepID, runID, taskID, formatTime(now), formatTime(now)); err != nil {
-			return agent.TaskContext{}, false, err
-		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO invocations(id, run_id, task_id, step_id, kind, status, target, context_manifest_json, created_at, updated_at)
-			VALUES(?, ?, ?, ?, 'model', 'planned', ?, ?, ?, ?)`, invocationID, runID, taskID, stepID, modelTarget, manifest, formatTime(now), formatTime(now)); err != nil {
+			INSERT INTO runs(id, task_id, status, model_status, soul_version, target, context_manifest_json, started_at, updated_at)
+			VALUES(?, ?, 'active', 'planned', ?, ?, ?, ?, ?)`, runID, taskID, soulVersion, modelTarget, manifest, formatTime(now), formatTime(now)); err != nil {
 			return agent.TaskContext{}, false, err
 		}
 		if err := appendEvent(ctx, tx, "task", taskID, "task.started", map[string]any{"run_id": runID}, now); err != nil {
 			return agent.TaskContext{}, false, err
 		}
-		if err := appendEvent(ctx, tx, "invocation", invocationID, "invocation.planned", map[string]any{"kind": "model", "run_id": runID}, now); err != nil {
+		if err := appendEvent(ctx, tx, "run", runID, "run.planned", map[string]any{"target": modelTarget}, now); err != nil {
 			return agent.TaskContext{}, false, err
 		}
 	}
@@ -802,6 +785,7 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 	messageQuery := `
 		SELECT sequence, id, task_id, COALESCE(delivery_id, ''), kind, role, content_ref_json FROM interactions
 		WHERE conversation_id = ? AND sequence >= ?
+			AND kind NOT IN ('approval_request', 'runtime_error')
 			AND (kind != 'internal_trigger' OR id = (SELECT source_interaction_id FROM tasks WHERE id = ?))
 		ORDER BY sequence DESC`
 	messageArgs := []any{channel.ConversationID, firstSequence, taskID}
@@ -881,7 +865,7 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 		return agent.TaskContext{}, false, err
 	}
 	return agent.TaskContext{
-		TaskID: taskID, RunID: runID, InvocationID: invocationID, SourceChannel: sourceChannel,
+		TaskID: taskID, RunID: runID, SourceChannel: sourceChannel,
 		InputSequence: inputSequence, ConversationSequence: conversationSequence, Messages: messages,
 		CheckpointRef: agentCheckpointRef, CheckpointPhase: checkpointPhase,
 		CurrentTask: currentTask, ObjectiveRef: objectiveRef,
@@ -974,7 +958,7 @@ func (s *Store) LoadConversationUpdatesAfter(ctx context.Context, taskID string,
 	return records, nil
 }
 
-func (s *Store) SaveContextCheckpoint(ctx context.Context, taskID, invocationID string, checkpoint agent.ContextCheckpoint) error {
+func (s *Store) SaveContextCheckpoint(ctx context.Context, taskID, runID string, checkpoint agent.ContextCheckpoint) error {
 	now := time.Now().UTC()
 	encodedRef, err := json.Marshal(checkpoint.SummaryRef)
 	if err != nil {
@@ -994,14 +978,14 @@ func (s *Store) SaveContextCheckpoint(ctx context.Context, taskID, invocationID 
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO context_checkpoints(
-			id, task_id, invocation_id, summary_ref_json, source_ids_json, first_kept_sequence,
+			id, task_id, run_id, summary_ref_json, source_ids_json, first_kept_sequence,
 			summarized_count, tokens_before, tokens_after, created_at
 		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		checkpoint.ID, taskID, invocationID, string(encodedRef), string(encodedSourceIDs), checkpoint.FirstKeptSequence,
+		checkpoint.ID, taskID, runID, string(encodedRef), string(encodedSourceIDs), checkpoint.FirstKeptSequence,
 		checkpoint.SummarizedCount, checkpoint.TokensBefore, checkpoint.TokensAfter, formatTime(now)); err != nil {
 		return err
 	}
-	if err := appendEvent(ctx, tx, "invocation", invocationID, "context.compacted", map[string]any{
+	if err := appendEvent(ctx, tx, "run", runID, "context.compacted", map[string]any{
 		"checkpoint_id": checkpoint.ID, "summarized_count": checkpoint.SummarizedCount,
 		"first_kept_sequence": checkpoint.FirstKeptSequence,
 		"tokens_before":       checkpoint.TokensBefore, "tokens_after": checkpoint.TokensAfter,
@@ -1039,12 +1023,12 @@ func (s *Store) SaveAgentCheckpoint(ctx context.Context, task agent.TaskContext,
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO agent_checkpoints(
-			id, task_id, run_id, invocation_id, phase, state_ref_json, status, created_at, updated_at
+			id, task_id, run_id, execution_id, phase, state_ref_json, status, created_at, updated_at
 		) VALUES(?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
-		checkpointID, task.TaskID, task.RunID, task.InvocationID, phase, string(encodedRef), formatTime(now), formatTime(now)); err != nil {
+		checkpointID, task.TaskID, task.RunID, task.ExecutionKey(), phase, string(encodedRef), formatTime(now), formatTime(now)); err != nil {
 		return err
 	}
-	if err := appendEvent(ctx, tx, "invocation", task.InvocationID, "agent.checkpoint.saved", map[string]any{
+	if err := appendEvent(ctx, tx, "run", task.RunID, "agent.checkpoint.saved", map[string]any{
 		"checkpoint_id": checkpointID, "phase": phase,
 	}, now); err != nil {
 		return err
@@ -1052,7 +1036,7 @@ func (s *Store) SaveAgentCheckpoint(ctx context.Context, task agent.TaskContext,
 	return tx.Commit()
 }
 
-func (s *Store) MarkInvocationDispatched(ctx context.Context, invocationID string) error {
+func (s *Store) MarkRunDispatched(ctx context.Context, runID string) error {
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1060,13 +1044,13 @@ func (s *Store) MarkInvocationDispatched(ctx context.Context, invocationID strin
 	}
 	defer tx.Rollback()
 	var status string
-	if err := tx.QueryRowContext(ctx, `SELECT status FROM invocations WHERE id = ?`, invocationID).Scan(&status); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT model_status FROM runs WHERE id = ?`, runID).Scan(&status); err != nil {
 		return err
 	}
 	if status == "dispatched" {
 		return tx.Commit()
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE invocations SET status = 'dispatched', updated_at = ? WHERE id = ? AND status = 'planned'`, formatTime(now), invocationID)
+	result, err := tx.ExecContext(ctx, `UPDATE runs SET model_status = 'dispatched', updated_at = ? WHERE id = ? AND model_status = 'planned'`, formatTime(now), runID)
 	if err != nil {
 		return err
 	}
@@ -1075,18 +1059,18 @@ func (s *Store) MarkInvocationDispatched(ctx context.Context, invocationID strin
 		return err
 	}
 	if count != 1 {
-		return fmt.Errorf("invocation %s is not planned", invocationID)
+		return fmt.Errorf("run %s is not planned", runID)
 	}
-	if err := appendEvent(ctx, tx, "invocation", invocationID, "invocation.dispatched", map[string]any{"kind": "model"}, now); err != nil {
+	if err := appendEvent(ctx, tx, "run", runID, "run.dispatched", map[string]any{"kind": "model"}, now); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func (s *Store) UpdateInvocationContext(ctx context.Context, invocationID, manifest string) error {
+func (s *Store) UpdateRunContext(ctx context.Context, runID, manifest string) error {
 	result, err := s.db.ExecContext(ctx, `
-		UPDATE invocations SET context_manifest_json = ?, updated_at = ?
-		WHERE id = ? AND status IN ('planned', 'dispatched')`, manifest, formatTime(time.Now().UTC()), invocationID)
+		UPDATE runs SET context_manifest_json = ?, updated_at = ?
+		WHERE id = ? AND model_status IN ('planned', 'dispatched')`, manifest, formatTime(time.Now().UTC()), runID)
 	if err != nil {
 		return err
 	}
@@ -1095,7 +1079,7 @@ func (s *Store) UpdateInvocationContext(ctx context.Context, invocationID, manif
 		return err
 	}
 	if count != 1 {
-		return fmt.Errorf("invocation %s cannot update context", invocationID)
+		return fmt.Errorf("run %s cannot update context", runID)
 	}
 	return nil
 }
@@ -1169,18 +1153,16 @@ func (s *Store) CommitArtifact(ctx context.Context, commit agent.Commit) error {
 	if existing > 0 {
 		return nil
 	}
-	invocationStatus := "succeeded"
-	stepStatus := "succeeded"
-	invocationEvent := "invocation.succeeded"
+	modelStatus := "succeeded"
+	runEvent := "run.succeeded"
 	if commit.TerminalStatus == "failed" {
-		invocationStatus = "failed"
-		stepStatus = "failed"
-		invocationEvent = "invocation.failed"
+		modelStatus = "failed"
+		runEvent = "run.failed"
 	}
 	result, err := tx.ExecContext(ctx, `
-		UPDATE invocations SET status = ?, usage_json = ?, error_code = ?, updated_at = ?
-		WHERE id = ? AND status IN ('planned', 'dispatched')`,
-		invocationStatus, string(usage), commit.FailureCode, formatTime(now), commit.InvocationID)
+		UPDATE runs SET model_status = ?, usage_json = ?, error_code = ?, updated_at = ?
+		WHERE id = ? AND model_status IN ('planned', 'dispatched')`,
+		modelStatus, string(usage), commit.FailureCode, formatTime(now), commit.RunID)
 	if err != nil {
 		return err
 	}
@@ -1189,10 +1171,7 @@ func (s *Store) CommitArtifact(ctx context.Context, commit agent.Commit) error {
 		return err
 	}
 	if count != 1 {
-		return fmt.Errorf("invocation %s cannot commit result", commit.InvocationID)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE steps SET status = ?, updated_at = ? WHERE run_id = ? AND kind = 'model' AND status = 'running'`, stepStatus, formatTime(now), commit.RunID); err != nil {
-		return err
+		return fmt.Errorf("run %s cannot commit result", commit.RunID)
 	}
 	if err := insertContentRef(ctx, tx, commit.ArtifactRef, now); err != nil {
 		return err
@@ -1265,9 +1244,9 @@ func (s *Store) CommitArtifact(ctx context.Context, commit agent.Commit) error {
 		WHERE task_id = ? AND status = 'active'`, formatTime(now), commit.TaskID); err != nil {
 		return err
 	}
-	if err := appendEvent(ctx, tx, "invocation", commit.InvocationID, invocationEvent, map[string]any{
-		"run_id": commit.RunID, "error_code": commit.FailureCode,
-		"provider": commit.Usage.Provider, "model": commit.Usage.Model,
+	if err := appendEvent(ctx, tx, "run", commit.RunID, runEvent, map[string]any{
+		"error_code": commit.FailureCode,
+		"provider":   commit.Usage.Provider, "model": commit.Usage.Model,
 		"model_calls":  commit.Usage.ModelCalls,
 		"input_tokens": commit.Usage.InputTokens, "output_tokens": commit.Usage.OutputTokens,
 		"cache_hit_tokens": commit.Usage.CacheHitTokens, "cache_miss_tokens": commit.Usage.CacheMissTokens,
@@ -1503,9 +1482,6 @@ func (s *Store) PauseForApproval(ctx context.Context, commit agent.ApprovalCommi
 		}
 		return fmt.Errorf("task %s cannot wait for approval", commit.TaskID)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE steps SET status = 'waiting', updated_at = ? WHERE run_id = ? AND status = 'running'`, formatTime(now), commit.RunID); err != nil {
-		return err
-	}
 	if err := appendEvent(ctx, tx, "approval", commit.ApprovalID, "approval.requested", map[string]any{
 		"task_id": commit.TaskID, "effect_intent_id": commit.Intent.ID, "control": commit.Intent.Control,
 		"target": commit.Intent.Target, "parameters_hash": commit.Intent.ParametersHash,
@@ -1618,17 +1594,16 @@ func (s *Store) ClaimApprovalResume(ctx context.Context, approvalID, owner strin
 	var continuation, grantID, grantApprovalID, grantTaskID, grantToolID, grantToolVersion string
 	var grantEffect, grantTarget, grantHash, grantControl, grantExpires string
 	err = tx.QueryRowContext(ctx, `
-		SELECT a.task_id, a.status, a.continuation_ref_json, e.run_id, i.id,
+		SELECT a.task_id, a.status, a.continuation_ref_json, e.run_id,
 			COALESCE(g.id, ''), COALESCE(g.approval_id, ''), COALESCE(g.task_id, ''),
 			COALESCE(g.tool_id, ''), COALESCE(g.tool_version, ''), COALESCE(g.effect_class, ''),
 			COALESCE(g.target, ''), COALESCE(g.parameters_hash, ''), COALESCE(g.control_level, ''),
 			COALESCE(g.expires_at, '')
 		FROM approvals a
 		JOIN effect_intents e ON e.id = a.effect_intent_id
-		JOIN invocations i ON i.run_id = e.run_id AND i.kind = 'model'
 		LEFT JOIN capability_grants g ON g.approval_id = a.id
 		WHERE a.id = ? AND a.status IN ('approved', 'denied', 'expired')`, approvalID).
-		Scan(&resume.Task.TaskID, &resume.Decision, &continuation, &resume.Task.RunID, &resume.Task.InvocationID,
+		Scan(&resume.Task.TaskID, &resume.Decision, &continuation, &resume.Task.RunID,
 			&grantID, &grantApprovalID, &grantTaskID, &grantToolID, &grantToolVersion, &grantEffect,
 			&grantTarget, &grantHash, &grantControl, &grantExpires)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1651,9 +1626,6 @@ func (s *Store) ClaimApprovalResume(ctx context.Context, approvalID, owner strin
 	}
 	count, err := result.RowsAffected()
 	if err != nil || count != 1 {
-		return agent.ApprovalResume{}, false, err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE steps SET status = 'running', updated_at = ? WHERE run_id = ? AND status = 'waiting'`, formatTime(now), resume.Task.RunID); err != nil {
 		return agent.ApprovalResume{}, false, err
 	}
 	if resume.Decision == "approved" {

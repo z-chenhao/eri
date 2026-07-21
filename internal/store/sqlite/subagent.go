@@ -365,9 +365,6 @@ func (s *Store) PauseForSubagent(ctx context.Context, commit agent.SubagentWaitC
 		}
 		return fmt.Errorf("task %s cannot wait for subagent", commit.TaskID)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE steps SET status = 'waiting', updated_at = ? WHERE run_id = ? AND status = 'running'`, formatTime(now), commit.RunID); err != nil {
-		return err
-	}
 	if err := appendEvent(ctx, tx, "task", commit.TaskID, "task.waiting", map[string]any{
 		"reason": "subagent", "delegation_id": commit.DelegationID, "role_id": roleID, "provider_id": providerID,
 	}, now); err != nil {
@@ -420,13 +417,12 @@ func (s *Store) ClaimSubagentResume(ctx context.Context, delegationID, owner str
 	var resultJSON, continuationJSON, progressDeliveryID string
 	err = tx.QueryRowContext(ctx, `
 		SELECT d.parent_task_id, d.parent_run_id, d.id, d.role_id, d.provider_id, d.status, d.result_ref_json, d.continuation_ref_json,
-			d.progress_delivery_id, i.id
+			d.progress_delivery_id
 		FROM subagent_runs d
-		JOIN invocations i ON i.run_id = d.parent_run_id AND i.kind = 'model'
 		WHERE d.id = ? AND d.status IN ('completed', 'failed', 'unknown', 'canceled')
 			AND d.result_ref_json IS NOT NULL AND d.continuation_ref_json IS NOT NULL`, delegationID).
 		Scan(&resume.Task.TaskID, &resume.Task.RunID, &resume.DelegationID, &resume.RoleID, &resume.ProviderID, &resume.Status,
-			&resultJSON, &continuationJSON, &progressDeliveryID, &resume.Task.InvocationID)
+			&resultJSON, &continuationJSON, &progressDeliveryID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return agent.SubagentResume{}, false, nil
 	}
@@ -461,9 +457,6 @@ func (s *Store) ClaimSubagentResume(ctx context.Context, delegationID, owner str
 		return agent.SubagentResume{}, false, err
 	}
 	if count, err := result.RowsAffected(); err != nil || count != 1 {
-		return agent.SubagentResume{}, false, err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE steps SET status = 'running', updated_at = ? WHERE run_id = ? AND status = 'waiting'`, formatTime(now), resume.Task.RunID); err != nil {
 		return agent.SubagentResume{}, false, err
 	}
 	if err := appendEvent(ctx, tx, "task", resume.Task.TaskID, "task.resumed", map[string]any{

@@ -37,7 +37,7 @@ func TestSubagentCompletionWaitsForTheProgressDeliveryBeforeResuming(t *testing.
 	}
 	now := time.Now().UTC()
 	intent, created, err := store.PlanIntent(ctx, tool.Intent{
-		ID: "codex-delegation-1", TaskID: task.TaskID, RunID: task.RunID, InvocationID: task.InvocationID,
+		ID: "codex-delegation-1", TaskID: task.TaskID, RunID: task.RunID, InvocationID: task.RunID,
 		ToolCallID: "delegate-call-1", ToolID: "builtin.delegate", ToolVersion: "0.4.0",
 		Effect: policy.ReadOnly, Target: "subagent:codex:read_only", ParametersHash: "parameters-hash",
 		IdempotencyKey: "codex-key", Control: policy.NotifyAfter, ReconciliationStrategy: "inspect_selected_subagent",
@@ -60,7 +60,7 @@ func TestSubagentCompletionWaitsForTheProgressDeliveryBeforeResuming(t *testing.
 		t.Fatalf("resume outbox before continuation = %d", got)
 	}
 	if err := store.PauseForSubagent(ctx, agent.SubagentWaitCommit{
-		TaskID: task.TaskID, RunID: task.RunID, InvocationID: task.InvocationID, DelegationID: job.ID, RoleID: "engineering_team", ProviderID: "codex",
+		TaskID: task.TaskID, RunID: task.RunID, DelegationID: job.ID, RoleID: "engineering_team", ProviderID: "codex",
 		ArtifactID: "codex-progress-artifact", EvalID: "codex-progress-eval", DeliveryID: "codex-progress-delivery",
 		ArtifactRef: testRef("codex-progress", "codex-progress-hash"), TraceRef: testRef("codex-trace", "codex-trace-hash"),
 		ContinuationRef: testRef("codex-continuation", "codex-continuation-hash"),

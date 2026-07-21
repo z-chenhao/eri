@@ -31,14 +31,14 @@ func TestMemoryToolBindsExplicitUserMemoryToGatewayTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := candidate.Execute(context.Background(), prepared); err == nil {
-		t.Fatal("expected missing gateway task to reject untraceable user memory")
+		t.Fatal("expected missing source interaction to reject untraceable user memory")
 	}
 
-	prepared.TaskID = "task-user-message"
+	prepared.SourceInteractionID = "user-message"
 	if _, err := candidate.Execute(context.Background(), prepared); err != nil {
 		t.Fatal(err)
 	}
-	if service.captured.SourceRef != "task:task-user-message" || service.captured.SourceType != "user" || service.captured.IndependenceGroup != "user:self" {
+	if service.captured.SourceRef != "interaction:user-message" || service.captured.SourceType != "user" || service.captured.IndependenceGroup != "user:self" {
 		t.Fatalf("captured provenance = %+v", service.captured)
 	}
 
@@ -52,11 +52,11 @@ func TestMemoryToolBindsExplicitUserMemoryToGatewayTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	correction.TaskID = "task-correction"
+	correction.SourceInteractionID = "correction-message"
 	if _, err := candidate.Execute(context.Background(), correction); err != nil {
 		t.Fatal(err)
 	}
-	if service.captured.ClaimID != "claim-original" || service.captured.Relation != memory.Contradicts || service.captured.SourceRef != "task:task-correction" {
+	if service.captured.ClaimID != "claim-original" || service.captured.Relation != memory.Contradicts || service.captured.SourceRef != "interaction:correction-message" {
 		t.Fatalf("captured correction = %+v", service.captured)
 	}
 }

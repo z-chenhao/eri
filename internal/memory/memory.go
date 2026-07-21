@@ -224,21 +224,21 @@ type Bundle struct {
 }
 
 type RecallRequest struct {
-	Query        string
-	Scope        string
-	TaskID       string
-	InvocationID string
-	Limit        int
-	At           time.Time
+	Query               string
+	Scope               string
+	RunID               string
+	SourceInteractionID string
+	Limit               int
+	At                  time.Time
 }
 
 type RetrievalRecord struct {
-	ID           string
-	TaskID       string
-	InvocationID string
-	QueryKey     string
-	CreatedAt    time.Time
-	Items        []RetrievalItem
+	ID                  string
+	RunID               string
+	SourceInteractionID string
+	QueryKey            string
+	CreatedAt           time.Time
+	Items               []RetrievalItem
 }
 
 type RetrievalItem struct {
@@ -471,7 +471,7 @@ func (s *Service) Recall(ctx context.Context, request RecallRequest) (_ Bundle, 
 	semanticState := "disabled"
 	defer func() {
 		attributes := []any{
-			"component", "memory", "operation", "recall", "task_id", request.TaskID, "invocation_id", request.InvocationID,
+			"component", "memory", "operation", "recall", "run_id", request.RunID, "source_interaction_id", request.SourceInteractionID,
 			"lexical_candidates", lexicalCount, "semantic_candidates", semanticCount, "retrieved", retrievedCount,
 			"injected", injectedCount, "semantic_status", semanticState, "duration_ms", time.Since(started).Milliseconds(),
 		}
@@ -487,9 +487,6 @@ func (s *Service) Recall(ctx context.Context, request RecallRequest) (_ Bundle, 
 		request.At = time.Now().UTC()
 	}
 	request.Limit = clampLimit(request.Limit)
-	if _, err := s.repository.ConsolidateMemory(ctx, time.Now().UTC(), 500); err != nil {
-		return Bundle{}, err
-	}
 	candidateLimit := request.Limit * 4
 	if candidateLimit > 100 {
 		candidateLimit = 100
@@ -539,7 +536,7 @@ func (s *Service) Recall(ctx context.Context, request RecallRequest) (_ Bundle, 
 	}
 	injectedCount = min(request.Limit, len(ranked))
 	bundle.Entries = append([]Entry(nil), ranked[:injectedCount]...)
-	if request.TaskID != "" && len(ranked) > 0 {
+	if request.RunID != "" && request.SourceInteractionID != "" && len(ranked) > 0 {
 		retrievalID, err := identifier.New()
 		if err != nil {
 			return Bundle{}, err
@@ -550,7 +547,7 @@ func (s *Service) Recall(ctx context.Context, request RecallRequest) (_ Bundle, 
 			items = append(items, RetrievalItem{MemoryID: entry.MemoryID, Rank: rank + 1, Score: entry.RecallScore, Reasons: entry.RecallReasons, Injected: rank < injectedCount})
 		}
 		if err := s.repository.RecordMemoryRetrieval(ctx, RetrievalRecord{
-			ID: retrievalID, TaskID: request.TaskID, InvocationID: request.InvocationID,
+			ID: retrievalID, RunID: request.RunID, SourceInteractionID: request.SourceInteractionID,
 			QueryKey: s.key("query:" + normalize(request.Query)), CreatedAt: request.At.UTC(), Items: items,
 		}); err != nil {
 			return Bundle{}, err

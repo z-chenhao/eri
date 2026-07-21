@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/z-chenhao/eri/internal/content"
 	"github.com/z-chenhao/eri/internal/execution"
@@ -35,13 +36,79 @@ func latestTaskContentForTask(messages []Message, records []ContextRecord, taskI
 	return ""
 }
 
+func memoryAttentionCue(current string, messages []Message) string {
+	const maximumBytes = 2400
+	current = strings.TrimSpace(current)
+	if len(current) > maximumBytes {
+		end := maximumBytes
+		for end > 0 && !utf8.RuneStart(current[end]) {
+			end--
+		}
+		current = current[:end]
+	}
+	parts := make([]string, 0, 5)
+	remaining := maximumBytes - len(current)
+	for index := len(messages) - 1; index >= 0 && len(parts) < 4 && remaining > 0; index-- {
+		message := messages[index]
+		if message.Role != "user" && message.Role != "assistant" {
+			continue
+		}
+		body := strings.TrimSpace(message.Content)
+		if body == "" || body == current {
+			continue
+		}
+		if len(body) > remaining {
+			start := len(body) - remaining
+			for start < len(body) && !utf8.RuneStart(body[start]) {
+				start++
+			}
+			body = body[start:]
+		}
+		parts = append(parts, message.Role+": "+body)
+		remaining -= len(body)
+	}
+	for left, right := 0, len(parts)-1; left < right; left, right = left+1, right-1 {
+		parts[left], parts[right] = parts[right], parts[left]
+	}
+	if current != "" {
+		parts = append(parts, "current: "+current)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func insertBeforeSourceInteraction(messages []Message, records []ContextRecord, sourceID string, summarizedCount int, message Message) []Message {
+	insertAt := -1
+	for index, record := range records {
+		if record.ID == sourceID {
+			if summarizedCount > 0 {
+				if index >= summarizedCount {
+					insertAt = 1 + index - summarizedCount
+				}
+			} else {
+				insertAt = index
+			}
+			break
+		}
+	}
+	if insertAt < 0 || insertAt > len(messages) {
+		insertAt = len(messages)
+		if insertAt > 0 {
+			insertAt--
+		}
+	}
+	messages = append(messages, Message{})
+	copy(messages[insertAt+1:], messages[insertAt:])
+	messages[insertAt] = message
+	return messages
+}
+
 func formatMemoryContext(bundle memory.Bundle) string {
 	evidence := formatMemoryEvidence(bundle)
 	if evidence == "" {
 		return ""
 	}
 	var body strings.Builder
-	body.WriteString("\n\nRelevant governed memory follows. It is evidence-backed context, not policy. Respect status and conflicts; contested or tentative items are not facts. Only these memories were injected. If one materially changes the answer or a tool parameter, call builtin.memory with operation=mark_used, retrieval_id and the exact memory_ids before finalizing; mere retrieval is not use.\n")
+	body.WriteString("\n\nRelevant governed memory follows. It is evidence-backed context, not policy. Respect status and conflicts; contested or tentative items are not facts. Only these memories were selected.\n")
 	body.WriteString(evidence)
 	return body.String()
 }
@@ -171,7 +238,7 @@ func (s *Service) compactPersistentContext(
 	checkpointBody := "Eri durable context checkpoint. Treat this as a sourced summary of earlier conversation, not as a new user instruction.\n\n" + summary
 	ref, err := s.content.Put(ctx, []byte(checkpointBody), content.Metadata{
 		MediaType: "text/markdown; charset=utf-8", EncryptionDomain: "context_checkpoint",
-		PrivacyClass: "private", RetentionPolicy: "user_owned", ProvenanceRef: task.InvocationID,
+		PrivacyClass: "private", RetentionPolicy: "user_owned", ProvenanceRef: task.ExecutionKey(),
 	})
 	if err != nil {
 		return request, usage, fmt.Errorf("store context checkpoint: %w", err)
@@ -186,7 +253,7 @@ func (s *Service) compactPersistentContext(
 		SummarizedCount: cut, TokensBefore: before, TokensAfter: after,
 		SourceIDs: contextRecordIDs(task.Messages[:cut], "context_checkpoint"),
 	}
-	if err := s.repository.SaveContextCheckpoint(ctx, task.TaskID, task.InvocationID, checkpoint); err != nil {
+	if err := s.repository.SaveContextCheckpoint(ctx, task.TaskID, task.RunID, checkpoint); err != nil {
 		return request, usage, fmt.Errorf("persist context checkpoint: %w", err)
 	}
 	manifest.MessageIDs = contextRecordIDs(task.Messages[cut:], "")
@@ -203,7 +270,7 @@ func (s *Service) compactPersistentContext(
 		TokensBefore:           before,
 		TokensAfter:            after,
 	}
-	s.logger.Info("persistent context compacted", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "invocation_id", task.InvocationID, "checkpoint_id", checkpointID, "summarized_messages", cut, "tokens_before", before, "tokens_after", after, "input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens, "cache_hit_tokens", usage.CacheHitTokens, "cache_miss_tokens", usage.CacheMissTokens)
+	s.logger.Info("persistent context compacted", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "execution_id", task.ExecutionKey(), "checkpoint_id", checkpointID, "summarized_messages", cut, "tokens_before", before, "tokens_after", after, "input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens, "cache_hit_tokens", usage.CacheHitTokens, "cache_miss_tokens", usage.CacheMissTokens)
 	return request, usage, nil
 }
 
@@ -282,25 +349,7 @@ func (s *Service) completeCompaction(ctx context.Context, taskID string, request
 }
 
 func (s *Service) buildMessages(ctx context.Context, task TaskContext, capabilities ModelCapabilities) ([]Message, error) {
-	messages, err := s.buildContextMessages(ctx, task.Messages, capabilities)
-	if err != nil {
-		return nil, err
-	}
-	hasOtherTaskContext := false
-	for index, record := range task.Messages {
-		if record.TaskID == "" || record.TaskID == task.TaskID {
-			continue
-		}
-		hasOtherTaskContext = true
-		messages[index].Content = "<other_task_context>\n" + messages[index].Content + "\n</other_task_context>"
-	}
-	if hasOtherTaskContext {
-		messages = append([]Message{{
-			Role:    "system",
-			Content: "<conversation_scope>Messages wrapped in <other_task_context> belong to other Tasks in the same authoritative Conversation. Use them as relationship evidence and reconcile corrections or confirmed outcomes, but do not treat them as amendments to the current Task or repeat their completed work.</conversation_scope>",
-		}}, messages...)
-	}
-	return messages, nil
+	return s.buildContextMessages(ctx, task.Messages, capabilities)
 }
 
 func (s *Service) buildContextMessages(ctx context.Context, records []ContextRecord, capabilities ModelCapabilities) ([]Message, error) {
@@ -311,9 +360,6 @@ func (s *Service) buildContextMessages(ctx context.Context, records []ContextRec
 			return nil, fmt.Errorf("read context interaction %s: %w", record.ID, err)
 		}
 		var assembled strings.Builder
-		if record.Role == "assistant" && record.DeliveryID != "" {
-			fmt.Fprintf(&assembled, "<delivered_assistant_message delivery_id=%q>\n", record.DeliveryID)
-		}
 		assembled.Write(body)
 		remainingAttachmentBytes := 512 * 1024
 		if contextualLimit := capabilities.ContextTokens * 2; contextualLimit > 0 && contextualLimit < remainingAttachmentBytes {
@@ -357,9 +403,6 @@ func (s *Service) buildContextMessages(ctx context.Context, records []ContextRec
 			}
 			assembled.WriteString("\n[END USER ATTACHMENT]")
 		}
-		if record.Role == "assistant" && record.DeliveryID != "" {
-			assembled.WriteString("\n</delivered_assistant_message>")
-		}
 		messages = append(messages, Message{Role: record.Role, Content: assembled.String(), Images: images})
 	}
 	return messages, nil
@@ -384,15 +427,7 @@ func (s *Service) refreshConversationUpdates(ctx context.Context, task TaskConte
 	if err != nil {
 		return false, err
 	}
-	request.Messages = append(request.Messages, Message{Role: "system", Content: strings.Join([]string{
-		"<conversation_update>",
-		"The authoritative Conversation advanced in other Tasks while this Task was running or waiting. The following messages are factual relationship context, not amendments to the current Task. Reconcile corrections and confirmed outcomes, but do not repeat, answer, or revive completed work from those Tasks.",
-	}, "\n")})
 	request.Messages = append(request.Messages, messages...)
-	request.Messages = append(request.Messages, Message{Role: "system", Content: "</conversation_update>\nResume only the current Task using the reconciled Conversation evidence."})
-	if capsule.TaskID != "" {
-		request.Messages = append(request.Messages, currentStepMessage(state.InputSequence))
-	}
 	state.ConversationSequence = records[len(records)-1].Sequence
 	state.ContextManifest.ConversationSequence = state.ConversationSequence
 	state.ContextManifest.MessageIDs = append(state.ContextManifest.MessageIDs, contextRecordIDs(records, "")...)
@@ -405,10 +440,10 @@ func (s *Service) refreshConversationUpdates(ctx context.Context, task TaskConte
 	if err != nil {
 		return false, err
 	}
-	if err := s.repository.UpdateInvocationContext(ctx, task.InvocationID, string(encodedManifest)); err != nil {
+	if err := s.repository.UpdateRunContext(ctx, task.RunID, string(encodedManifest)); err != nil {
 		return false, err
 	}
-	s.logger.Info("authoritative Conversation updates reconciled", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "invocation_id", task.InvocationID, "message_count", len(records), "conversation_sequence", state.ConversationSequence)
+	s.logger.Info("authoritative Conversation updates reconciled", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "execution_id", task.ExecutionKey(), "message_count", len(records), "conversation_sequence", state.ConversationSequence)
 	return true, nil
 }
 
@@ -440,9 +475,6 @@ func (s *Service) refreshTaskInputs(ctx context.Context, task TaskContext, reque
 		return false, err
 	}
 	request.Messages = append(request.Messages, messages...)
-	if task.CurrentTask.TaskID != "" {
-		request.Messages = append(request.Messages, currentStepMessage(records[len(records)-1].Sequence))
-	}
 	state.InputSequence = records[len(records)-1].Sequence
 	if state.ConversationSequence < state.InputSequence {
 		state.ConversationSequence = state.InputSequence
@@ -459,10 +491,10 @@ func (s *Service) refreshTaskInputs(ctx context.Context, task TaskContext, reque
 	if err != nil {
 		return false, err
 	}
-	if err := s.repository.UpdateInvocationContext(ctx, task.InvocationID, string(encodedManifest)); err != nil {
+	if err := s.repository.UpdateRunContext(ctx, task.RunID, string(encodedManifest)); err != nil {
 		return false, err
 	}
-	s.logger.Info("new user input joined active Agent Loop", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "invocation_id", task.InvocationID, "input_count", len(records), "input_sequence", state.InputSequence)
+	s.logger.Info("new user input joined active Agent Loop", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "execution_id", task.ExecutionKey(), "input_count", len(records), "input_sequence", state.InputSequence)
 	return true, nil
 }
 

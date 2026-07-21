@@ -60,9 +60,9 @@ func Project(fact eventlog.Event, context Context) []Event {
 		return []Event{{Type: RunError, Timestamp: timestamp, ThreadID: context.ThreadID, RunID: runID, Message: "Eri could not complete the task", Code: "task_failed"}}
 	case "task.canceled":
 		return []Event{{Type: RunFinished, Timestamp: timestamp, ThreadID: context.ThreadID, RunID: runID, Result: map[string]any{"status": "canceled"}}}
-	case "invocation.planned":
+	case "run.planned":
 		return []Event{{Type: StepStarted, Timestamp: timestamp, StepName: "agent-loop:" + fact.AggregateID}}
-	case "invocation.succeeded", "invocation.failed", "invocation.canceled":
+	case "run.succeeded", "run.failed", "run.canceled":
 		return []Event{{Type: StepFinished, Timestamp: timestamp, StepName: "agent-loop:" + fact.AggregateID}}
 	case "effect.planned":
 		name := dataString(fact, "tool_id")

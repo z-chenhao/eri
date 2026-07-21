@@ -197,6 +197,8 @@ Fixed rules:
 
 ## 6. Task communication
 
+Task is a durable Runtime work record, not a prompt format and not an object the user must manage. It owns queueing, waiting, cancellation, recovery, and delivery state. One Run owns the actual Agent execution. Eri does not create model-visible Task, Objective, Step, or Invocation wrapper Messages; the user's Interaction or a trusted system event is the request.
+
 ### 6.1 Normal rhythm
 
 - The user states a goal without decomposing steps.
@@ -305,6 +307,8 @@ Memory distinguishes:
 
 Recall combines protected lexical matching, association, and local semantic similarity, then reranks under confidence, source, lifecycle, privacy, applicability, salience, and token constraints. Semantic vectors remain encrypted on the device. If no local embedding model is available, Eri continues with an explicit lexical/associative downgrade; private Memory is not sent to a cloud embedding API merely because chat uses a cloud model.
 
+Recall begins from the current Interaction plus a small recent conversational attention window, not from a Runtime-generated Task objective. The selected Memory is placed immediately before the Interaction that triggered the Run, after the stable System prefix. Retrieval records point to the source Interaction and Run. Retrieval never performs consolidation synchronously, so remembering more does not make every answer slower.
+
 Conflicting information never directly overwrites the old memory. Evidence can lower confidence, mark dispute, narrow conditions, or expire a Claim; strong facts can restore it. Repetition from one source does not become independent consensus. User deletion overrides consolidation, evaluation, and audit use; related indexes, derived memories, Episodes, and datasets are deleted or invalidated.
 
 ## 11. Autonomy, confirmation, and refusal
@@ -330,6 +334,7 @@ Refuse only at life-safety, clearly illegal, major financial-loss, or extreme ir
 ## 12. Skills, Tools, Plugins, and connection experience
 
 - A Skill is knowledge, method, checks, and resources for a class of work.
+- Experience is different: it is a short, versioned set of cross-task lessons that is always eligible for the Agent System prompt. A Skill is a named, scoped method loaded only when relevant. Repeated domain-specific Experience may become evidence for a Skill candidate, but never installs or rewrites a Skill automatically.
 - Eri loads only repository-bundled Skills and user-configured `~/.eri/skills`; it never inherits a general agent client's `~/.agents/skills` catalog or arbitrary external Skill directories.
 - A Tool performs a read, search, write, browse, notification, or other action.
 - Ordinary users need not understand Skills, MCP, Manifests, or Plugin processes.
@@ -386,7 +391,9 @@ Before OS sandboxing exists, installed Plugins are explicitly trusted local code
 - Sent version, Eval, Channel Receipt, correction, and real outcome remain linked.
 - Episodes are replayable evidence, not automatic formal datasets. Dataset entry requires authorization, redaction, deduplication, labeling, frozen version, and training/evaluation separation.
 
-Guarded self-evolution may produce a small runtime improvement instruction from failure evidence. It must pass protected-boundary checks, independent LLM comparison on unseen holdout, offline gain, stable low-rate canary, and automatic rollback on the first non-Pass. It can never modify Soul, user sovereignty, local-first, credentials, Memory truth, strong approval, model weights, or running code. Offline score is never described as real-world benefit.
+Self-evolution changes one explicit component named Experience, not the whole System prompt. Experience is short, immutable by version, and derived only from recurring Eval findings and causally linked real outcomes. A candidate must beat the current Experience on unseen holdout evidence, then enters a deterministic low-rate Run canary. The first non-Pass retires it; sustained Pass evidence promotes it. Each Run freezes its selected Experience version, and the independent Judge never receives that Experience.
+
+Experience can improve general investigation, execution, and verification habits. It can never modify Soul, user sovereignty, local-first, credentials, Memory truth, authorization, Policy, Tool contracts, delivery gates, user instructions, model weights, or running code. Offline score is experiment evidence, never claimed real-world benefit. Domain-specific methods do not keep expanding Experience: once repeated evidence shows a stable named procedure, evolution may propose a versioned Skill candidate. Skill activation or replacement remains an explicit governed change with validation, evaluation, lineage, and user confirmation.
 
 ## 17. System Observatory
 
@@ -481,4 +488,4 @@ Before MVP release:
 - Judge bias, calibration, and cross-model consistency.
 - Broker feasibility for Calendar, Email, and Booking providers beyond Google Workspace.
 - Strong macOS isolation for third-party Plugins.
-- Full task replay, cross-model evolution comparison, causal outcome attribution, and reward-hacking defenses. MVP remains limited to small runtime instructions with unseen holdout, canary, and rollback.
+- Full task replay, cross-model evolution comparison, causal outcome attribution, reward-hacking defenses, and automatic Skill candidate authoring. MVP evolves only the bounded Experience component; Skill creation and replacement remain confirmed changes.

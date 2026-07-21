@@ -152,12 +152,8 @@ func TestMemoryConflictSourceIndependenceRecoveryAndDelete(t *testing.T) {
 		`INSERT INTO conversations(id, created_at) VALUES('memory-delete-conversation', '` + now + `')`,
 		`INSERT INTO tasks(id, conversation_id, source_interaction_id, source_channel, status, terminal_status, version, created_at, updated_at)
 		 VALUES('memory-delete-task', 'memory-delete-conversation', 'source', 'test', 'completed', 'completed', 1, '` + now + `', '` + now + `')`,
-		`INSERT INTO runs(id, task_id, status, soul_version, started_at, ended_at)
-		 VALUES('memory-delete-run', 'memory-delete-task', 'succeeded', 'soul', '` + now + `', '` + now + `')`,
-		`INSERT INTO steps(id, run_id, task_id, kind, status, created_at, updated_at)
-		 VALUES('memory-delete-step', 'memory-delete-run', 'memory-delete-task', 'model', 'succeeded', '` + now + `', '` + now + `')`,
-		`INSERT INTO invocations(id, run_id, task_id, step_id, kind, status, target, context_manifest_json, created_at, updated_at)
-		 VALUES('memory-delete-invocation', 'memory-delete-run', 'memory-delete-task', 'memory-delete-step', 'model', 'succeeded', 'test', '{"memory":["` + initial.MemoryID + `"]}', '` + now + `', '` + now + `')`,
+		`INSERT INTO runs(id, task_id, status, model_status, soul_version, target, context_manifest_json, started_at, updated_at, ended_at)
+		 VALUES('memory-delete-run', 'memory-delete-task', 'succeeded', 'succeeded', 'soul', 'test', '{"memory":["` + initial.MemoryID + `"]}', '` + now + `', '` + now + `', '` + now + `')`,
 		`INSERT INTO episodes(id, task_id, manifest_ref_json, status, created_at)
 		 VALUES('memory-delete-episode', 'memory-delete-task', '{}', 'ready', '` + now + `')`,
 		`INSERT INTO dataset_candidates(id, episode_id, status, created_at)
@@ -261,18 +257,17 @@ func TestMemoryConsolidationPromotionExplicitUseAndAssociation(t *testing.T) {
 		`INSERT INTO conversations(id, created_at) VALUES('memory-use-conversation', '` + now + `')`,
 		`INSERT INTO tasks(id, conversation_id, source_interaction_id, source_channel, status, terminal_status, version, created_at, updated_at)
 		 VALUES('memory-use-task', 'memory-use-conversation', 'source', 'test', 'running', '', 1, '` + now + `', '` + now + `')`,
-		`INSERT INTO runs(id, task_id, status, soul_version, started_at) VALUES('memory-use-run', 'memory-use-task', 'active', 'soul', '` + now + `')`,
-		`INSERT INTO steps(id, run_id, task_id, kind, status, created_at, updated_at)
-		 VALUES('memory-use-step', 'memory-use-run', 'memory-use-task', 'model', 'active', '` + now + `', '` + now + `')`,
-		`INSERT INTO invocations(id, run_id, task_id, step_id, kind, status, target, context_manifest_json, created_at, updated_at)
-		 VALUES('memory-use-invocation', 'memory-use-run', 'memory-use-task', 'memory-use-step', 'model', 'dispatched', 'test', '{}', '` + now + `', '` + now + `')`,
+		`INSERT INTO interactions(id, conversation_id, task_id, direction, role, kind, channel, content_ref_json, created_at)
+		 VALUES('memory-source-interaction', 'memory-use-conversation', 'memory-use-task', 'inbound', 'user', 'text', 'test', '{}', '` + now + `')`,
+		`INSERT INTO runs(id, task_id, status, model_status, soul_version, target, context_manifest_json, started_at, updated_at)
+		 VALUES('memory-use-run', 'memory-use-task', 'active', 'dispatched', 'soul', 'test', '{}', '` + now + `', '` + now + `')`,
 	} {
 		if _, err := store.db.ExecContext(ctx, statement); err != nil {
 			t.Fatal(err)
 		}
 	}
 	used, err := service.Recall(ctx, memory.RecallRequest{
-		Query: "azimuth quartz", TaskID: "memory-use-task", InvocationID: "memory-use-invocation", Limit: 10,
+		Query: "azimuth quartz", RunID: "memory-use-run", SourceInteractionID: "memory-source-interaction", Limit: 10,
 	})
 	if err != nil {
 		t.Fatal(err)

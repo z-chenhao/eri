@@ -23,7 +23,7 @@ Eri is a single-user, local-first, long-running Agent Assistant. The design must
 - Multi-tenant SaaS or distributed cluster.
 - Fixed business Workflow Engine or universal Event Sourcing.
 - Go dynamic-link Plugin ecosystem.
-- Online mutation of protected prompts, Skills, code, model weights, or configuration outside the guarded small-instruction experiment in section 17.5.
+- Ungoverned mutation of prompts, Skills, code, model weights, or configuration. The only online prompt experiment is the bounded, versioned Experience mechanism in section 17.5.
 - Voice, native desktop/mobile apps, or additional remote Message Channels beyond Lark/Feishu.
 - General knowledge graph or biological reproduction of the human brain.
 
@@ -288,9 +288,7 @@ Use stable opaque IDs without private meaning.
 | Interaction | One inbound/outbound interaction | Channel, sequence, reply-to, ContentRef |
 | Conversation | Continuous relationship mapped across Channels | one authoritative user timeline in MVP |
 | Task | Durable responsibility for a goal or commitment | queued, running, waiting, paused, completed, failed, canceled |
-| Run | One Task execution attempt | active, succeeded, failed, canceled |
-| Step | Inspectable/recoverable progress unit | model, tool, eval, delivery, wait, delegate, memory, reconcile |
-| Invocation | Model, Tool, Plugin, Eval, Agent, or Channel call | planned, dispatched, succeeded, failed, canceled, unknown |
+| Run | One Agent execution attempt, including model target, Context Manifest, usage, and result | active, succeeded, failed, canceled; model planned, dispatched, succeeded, failed, canceled, unknown |
 | Effect Intent | Normalized possible world mutation | planned, authorized, dispatched, confirmed, failed, unknown, compensated |
 | Artifact Version | Candidate Message/file/report/plan/action summary | candidate, evaluated, approved, delivered, superseded |
 | Delivery | Send attempt to a target Channel | queued, dispatching, sent, acknowledged, failed, unknown |
@@ -350,7 +348,7 @@ The user may add Messages while the Loop is active. Runtime persists them first,
 
 A provider-native Tool Call batch is one protocol frame: the assistant Message and exactly one `tool` Message for every declared `tool_call_id` must remain contiguous before another user, system, or assistant Message. Before the first Tool starts, a stale frame may be removed completely. After any governed Tool Result exists, Runtime preserves the assistant frame and completed Results, emits a governed `superseded_before_execution` Tool observation for every unstarted sibling, then appends the newer user Message. The skipped observation is internal protocol state, never fixed user-facing copy. Every completed Tool Result advances the encrypted `model_received` checkpoint with only the remaining calls pending. Recovery may replay an already-durable Effect despite a newer input watermark, but the watermark still rejects creation of a new stale Effect. Before every provider call, Runtime validates that no Tool Result is orphaned, duplicated, undeclared, or missing.
 
-`interactions.sequence` is the MVP input watermark. Model Turn Trace records the sequence it saw. Artifact, progress Delivery, and Effect Intent transactions compare their basis sequence with the newest inbound sequence; a mismatch returns control to the same Loop before any stale result crosses an effect or delivery boundary. If the terminal commit wins first, the invocation is no longer joinable and a later Message starts the next Task in the same Conversation.
+`interactions.sequence` is the MVP input watermark. Model Turn Trace records the sequence it saw. Artifact, progress Delivery, and Effect Intent transactions compare their basis sequence with the newest inbound sequence; a mismatch returns control to the same Loop before any stale result crosses an effect or delivery boundary. If the terminal commit wins first, the Run is no longer joinable and a later Message starts the next Task in the same Conversation.
 
 Progress is not a separate Workflow step or hardcoded timer reply. The model decides whether a material update is useful while making a native Tool Call. Runtime independently evaluates it, deduplicates its content hash, persists Artifact/Eval/Delivery/Event/Outbox, and keeps Task and Run active. With multiple outbox lanes, Delivery can reach Web/CLI while the original `task.wake` handler continues. Empty acknowledgements are rejected by the progress Judge.
 
@@ -380,32 +378,30 @@ Identity stores an immutable Soul source, versioned operational projection, rela
 
 ### 10.2 Context priority
 
-Build typed Context in this order:
+Build provider-visible Context in this order:
 
-1. System safety and authority boundary.
-2. Identity/Soul.
-3. Current Task, success criteria, and durable continuation.
-4. Relevant conversation and attachments.
-5. Retrieved governed Memory.
-6. Activated Skill instructions/resources.
-7. Available Tool schemas.
-8. Guarded evolution instruction.
+1. One System prompt: Agent safety/authority rules, Identity/Soul, the stable Skill catalog, the selected versioned Experience, then trusted date-only Runtime facts.
+2. The authoritative Conversation in its original `user`, `assistant`, `system`, and native Tool roles.
+3. At most one retrieved governed Memory system message, inserted immediately before the Interaction that triggered the Run.
+4. Available provider-native Tool schemas.
 
 Each item records source, purpose, privacy, token estimate, and whether it is sent to an external model. Untrusted files and Web content are clearly delimited as data and cannot redefine authority.
 
 Prompt text is compiled by purpose, not accumulated into one universal instruction. The primary generation prompt contains the immutable Soul plus only cross-capability Agent Loop and response rules. Capability-specific selection and operating guidance lives with the currently available Tool description and Schema; an unavailable Tool never leaves dormant instructions in the base prompt.
 
-The provider-visible physical order is cache-aware without changing the authority priority above: a byte-stable root System contains the Agent kernel, Soul, and stable Skill catalog; durable Conversation messages or a Context checkpoint follow; activated Skill instructions, guarded evolution, retrieved Memory, and date-only Runtime facts form a late dynamic suffix; a Runtime-owned Current Task Capsule, Task Objective, and Current Step close the initial request. The System-role capsule contains only durable Task/source Interaction identity and event or scheduled Commitment facts when applicable. An event-created Task records the typed event, its occurred state, and its `fulfillment` execution phase. For that fresh fulfillment Run, Context Assembly projects only the stored event objective and its source Interaction from Conversation history; unrelated Conversation frames remain authoritative local evidence but are not provider input or executable instruction. Separately governed Memory and Skills may still enter through their ordinary evidence boundaries. Runtime also removes the source registration capability from that phase, so a due Commitment cannot recreate, update, or extend itself through `builtin.commitments`; a new schedule requires a user instruction after this fulfillment. The objective body is a separate pinned Message that preserves the source Interaction's `user` or `system` role; Runtime never launders user text into System authority. This task frame remains in Agent checkpoints and survives Tool turns, recovery, and compaction while the Task is active. Later user turns amend the active Task and receive a refreshed Current Step. Terminal Tasks leave default model context; their outcomes remain Events/Episodes and only separately governed durable facts or preferences may enter Memory.
+The physical order is deliberately simple and cache-aware. The reusable Agent kernel, Soul, and Skill catalog remain the exact prefix of System. The immutable selected Experience version follows that prefix, and trusted Runtime facts form the volatile tail of the same System prompt. Conversation rows then enter without Task-specific XML wrappers, delivery wrappers, role changes, objective copies, or synthetic step messages. Retrieved Memory remains separate from the stable System prefix and is placed immediately before the triggering Interaction. A Skill's full body enters only when the model calls the ordinary Skill capability; Runtime does not parse `$name` or slash syntax and pre-inject Skill content.
 
-Exact timestamps remain in Task, Event, Invocation, Delivery, and Receipt records. The general model suffix exposes local calendar date and timezone, not a per-request wall clock. A scheduled Task additionally exposes its exact `scheduled_for` because that timestamp is causal task state. For a relative one-time request, the Commitments Tool accepts `after_seconds` and Runtime resolves it once against its trusted clock into an absolute persisted `at`; the model does not search for or infer the current wall clock. Provider-specific cache controls may add explicit breakpoints, but cache state is never required for correctness.
+Task Capsule, objective references, input revisions, event identity, scheduling facts, delivery identity, and Conversation watermarks remain durable Runtime state. They govern claims, recovery, stale-result fences, Tool availability, and side effects, but are not copied into model Messages. This keeps execution correctness in Runtime instead of trying to enforce it through repeated prompt text. Native `assistant(tool_calls) -> tool(result)` frames remain byte-faithful. Later Conversation rows are appended in their original roles at safe interruption boundaries.
 
-Eval never inherits the generation system prompt. A final or progress Judge receives its own short, purpose-specific rubric, the exact transcript, activated Skill evidence, confirmed Tool IDs, and a bounded Candidate Evaluation Context containing the Run's Soul, relevant governed Memory, and trusted Runtime facts. It does not receive Agent operating rules, the general Skill catalog, capability instructions, or the guarded evolution candidate it is judging. This prevents role conflicts and keeps online experiments independent from their evaluator. Checkpoints persist this bounded context; when migrating an older checkpoint that lacks it, Runtime reconstructs only the immutable Soul, neutral Memory evidence, and recorded Runtime facts, never legacy generation instructions.
+Exact timestamps remain in Task, Run, Event, Delivery, and Receipt records. The general System tail exposes local calendar date and timezone, not a per-request wall clock. A scheduled Task keeps exact `scheduled_for` as causal Runtime state; the model-visible system event says that the commitment is due without adding a metadata frame. For a relative one-time request, the Commitments Tool accepts `after_seconds` and Runtime resolves it once against its trusted clock into an absolute persisted `at`; the model does not search for or infer the current wall clock. Provider-specific cache controls may add explicit breakpoints, but cache state is never required for correctness.
+
+Eval never inherits the generation system prompt. A final or progress Judge receives its own short, purpose-specific rubric, the exact transcript, model-loaded Skill evidence, confirmed Tool IDs, and a bounded Candidate Evaluation Context containing the Run's Soul, relevant governed Memory, and trusted Runtime facts. It does not receive Agent operating rules, the general Skill catalog, Experience, or capability instructions. Checkpoints persist this bounded context; when migrating an older checkpoint that lacks it, Runtime reconstructs only the immutable Soul, neutral Memory evidence, and recorded Runtime facts, never legacy generation instructions.
 
 Prompt tests enforce these ownership boundaries and a compact default-kernel ceiling. Length is a regression signal, not proof of quality; release decisions still require behavior and real-model Eval across completion, false-success, clarification, privacy, Tool use, style stability, input tokens, and cache hits.
 
 ### 10.3 Context budget
 
-Reserve space for system/Soul, current objective, pending Tool round, and answer. Select history, Memory, Skills, and Tool schemas by relevance and value. Trigger compaction before overflow. Capability discovery comes from the real provider, never a silent 32K fallback.
+Reserve space for System/Soul, the recent Conversation, pending Tool round, and answer. Select history, Memory, and Tool schemas by relevance and value. Trigger compaction before overflow. Capability discovery comes from the real provider, never a silent 32K fallback.
 
 ### 10.4 Model Gateway
 
@@ -415,7 +411,7 @@ Ollama is default local. DeepSeek is optional and accessed either through enviro
 
 ### 10.5 DeepSeek cache and cost
 
-Keep the reusable request prefix byte-identical: the stable root System and durable Conversation/checkpoint precede late Memory, date/channel facts, and active Task framing. Tool schemas remain provider-native request fields and stable ordering is deterministic. Do not place a seconds-level current clock in the root System. Record provider-reported `cache_hit_tokens` and `cache_miss_tokens`; cache is best-effort, never correctness state. A live two-request probe validates that a stable prefix can hit before accepting a cache-sensitive release claim. DeepSeek thinking remains enabled for native Tool Calls, Judge, comparison, compaction, and structured synthesis. The adapter captures each assistant `reasoning_content` field beside its Tool Calls, persists the complete active transcript in the encrypted Agent checkpoint before Tool execution, and sends the field back on every later request that retains that assistant Message, including after recovery. At a terminal boundary, Runtime stores the final complete `ModelRequest` as a distinct `provider_transcript` inside the encrypted user-owned Run record. Observatory decodes only the safe Trace fields and ignores that transcript; data export and complete erasure retain their ordinary user-owned Content lineage.
+Keep the reusable request prefix byte-identical: the Agent kernel, Soul, and stable Skill catalog begin System; the selected Experience version follows; date-only Runtime facts occupy its volatile tail. Durable Conversation/checkpoints follow, with selected Memory immediately before the triggering Interaction. Tool schemas remain provider-native request fields and stable ordering is deterministic. Do not place a seconds-level current clock in System. Record provider-reported `cache_hit_tokens` and `cache_miss_tokens`; cache is best-effort, never correctness state. A live two-request probe validates that a stable prefix can hit before accepting a cache-sensitive release claim. DeepSeek thinking remains enabled for native Tool Calls, Judge, comparison, compaction, and structured synthesis. The adapter captures each assistant `reasoning_content` field beside its Tool Calls, persists the complete active transcript in the encrypted Agent checkpoint before Tool execution, and sends the field back on every later request that retains that assistant Message, including after recovery. At a terminal boundary, Runtime stores the final complete `ModelRequest` as a distinct `provider_transcript` inside the encrypted user-owned Run record. Observatory decodes only the safe Trace fields and ignores that transcript; data export and complete erasure retain their ordinary user-owned Content lineage.
 
 Reflection is not a separate Runtime, service, or Workflow. Inside a Run it means a model reorients after repeated evidence or performs a bounded structured analysis. Provider-required continuation state stays attached to the encrypted model transcript for exact replay; Eri exposes and promotes only the resulting instruction, finding, or summary.
 
@@ -429,11 +425,13 @@ Follow the open Agent Skills convention:
 
 - Discover directories containing `SKILL.md`.
 - Read only frontmatter `name` and `description` for selection.
-- Load full `SKILL.md` after the model selects it.
+- Load full `SKILL.md` only after the model selects it through the ordinary Skill Tool.
 - Resolve `references/`, `scripts/`, `assets/`, and templates relative to the Skill and only on demand.
 - Discover only repository-bundled Skills and user-configured `~/.eri/skills`; the Eri-specific user location overrides a bundled Skill with the same name and records the conflict. Never import `~/.agents/skills`, project `.agents/skills`, workspace `.eri/skills`, or arbitrary external directories.
 
-There is no private Skill manifest, keyword router, Skill Runtime, service, or implicit execution authority. Skill content is untrusted instruction below system/Soul/Policy. Scripts run only through ordinary Tools and authorization.
+There is no private Skill manifest, keyword router, Runtime-side explicit-syntax parser, Skill Runtime, service, or implicit execution authority. Skill content is untrusted instruction below System/Soul/Policy. Scripts run only through ordinary Tools and authorization.
+
+Experience and Skill have separate owners. Experience is a short global set of cross-task working lessons selected once per Run and included in System. A Skill is a named, domain-scoped method with optional resources and progressive disclosure. Repeated domain-specific evidence may justify a Skill candidate, but Runtime never converts Experience directly into an installed Skill. A Skill candidate requires portable frontmatter validation, protected-boundary review, frozen evidence lineage, offline task evaluation, and explicit user confirmation before creating or replacing anything under the user Skill root. Installed Skill evolution produces a new reviewable version; it does not silently mutate the active file.
 
 ### 11.2 Tool Gateway
 
@@ -475,11 +473,13 @@ The supporting surface analysis is recorded in [Local Codex External Agent integ
 
 Task transitions are explicit and versioned. `waiting` records why and what can resume it: user decision, approval, time, external event, provider recovery, or reconciliation. Completion requires all critical Effects and Deliveries to be resolved.
 
+Task exists only because queueing, leases, waiting, cancellation, and Delivery must survive process failure. It is not a cognitive plan and never becomes a model Message. One Run owns the Agent execution state, model dispatch state, Context Manifest, usage, and result. There are no durable model `Step` or model `Invocation` entities: Agent Loop turns belong to encrypted checkpoints and safe Trace projections, while actual side effects belong to Effect Intents. This removes empty 1:1 layers without weakening recovery or evidence.
+
 ### 12.2 Concurrency
 
 Bound global workers and per-provider/plugin concurrency. One lease owns a Task version at a time; leases renew and expire durably. A canceled Task cannot schedule new side effects. Different Tasks may advance concurrently while the authoritative Conversation sequence remains monotonic.
 
-There is at most one joinable foreground Task for the canonical Conversation. `CreateInbound` joins a Task only while its primary model invocation is `dispatched`; queued, waiting, completed, and failed work is not silently reopened. The existing interaction row is the durable attention mailbox, and its monotonic sequence is the input revision—no process-local queue is authoritative. Agent Loop reloads later inbound rows before model, Tool, Eval, progress, and final commit boundaries. Joined inputs remain separate ordered user Messages.
+There is at most one joinable foreground Task for the canonical Conversation. `CreateInbound` joins a Task only while its Run model state is `dispatched`; queued, waiting, completed, and failed work is not silently reopened. The existing interaction row is the durable attention mailbox, and its monotonic sequence is the input revision—no process-local queue is authoritative. Agent Loop reloads later inbound rows before model, Tool, Eval, progress, and final commit boundaries. Joined inputs remain separate ordered user Messages.
 
 This is a functional analogy to human interruption handling, not a claim to reproduce neurobiology: preserve the incoming signal, interrupt at a task boundary where possible, retain a resumption cue, and reorient before acting. Controlled studies report higher disruption when interruption occurs mid-task rather than at a boundary, a measurable resumption lag, and fewer resumption errors when people take time to reorient ([Bailey and Konstan, 2006](https://www.sciencedirect.com/science/article/pii/S074756320500107X); [Foroughi et al., 2016](https://pubmed.ncbi.nlm.nih.gov/26882286/); [Brumby et al., 2013](https://pubmed.ncbi.nlm.nih.gov/23795978/)). Eri's durable checkpoint is the resumption cue; the input fence is the stronger machine-specific guarantee that a stale cognitive result cannot act.
 
@@ -487,7 +487,7 @@ This is a functional analogy to human interruption handling, not a claim to repr
 
 A Commitment records objective, schedule/event trigger, next fire time, delivery-route intent, budget, and consent evidence. A user clarification updates the existing non-terminal Commitment and its next fire time rather than creating an overlapping schedule. `origin_channel` is used when the user explicitly requests a reminder: Runtime freezes the trusted creating Channel and any durable remote reply target. `recent_channel` is used for Eri-proposed ongoing work after user consent: every fire resolves the latest accepted inbound user Interaction and uses its trusted Channel; a remote Channel keeps its conversation target but starts a proactive Message rather than replying to an unrelated old Message. The Model may select only this routing intent and cannot supply a Channel or platform identifier.
 
-Each fire atomically records its resolved Channel and remote conversation target beside the created Task and emits them as safe routing facts in the Event Spine. Delivery retries and receipt commits use that same frozen per-fire target even if the user later talks elsewhere. Each fire creates a Task. The stored trigger retains system provenance. Context Assembly projects its ContentRef, typed `commitment.due` event with `occurred` state, and `commitment_id/scheduled_for` facts into the active Task Capsule and places a Current Step after late dynamic context; it never rewrites the trigger as user-authored history or treats the request that registered it as unfinished work. The capsule persists through Agent checkpoints and is re-pinned after compaction until the Task becomes terminal, so unrelated conversation cannot replace the scheduled objective. Timezone changes are handled explicitly. Scheduler survives restart and does not infer commitment from an ignored suggestion.
+Each fire atomically records its resolved Channel and remote conversation target beside the created Task and emits them as safe routing facts in the Event Spine. Delivery retries and receipt commits use that same frozen per-fire target even if the user later talks elsewhere. Each fire creates a Task and one canonical Conversation Interaction with `system` role and `internal_trigger` kind. That Interaction is the model-visible event, equivalent to a new user turn except for its trusted system provenance. Typed `commitment.due`, occurred state, `commitment_id`, `scheduled_for`, execution phase, and delivery route remain in the Runtime Task Capsule and manifest rather than becoming extra prompt Messages. Runtime removes `builtin.commitments` during fulfillment, so the due event cannot recreate or extend itself. Timezone changes are handled explicitly. Scheduler survives restart and does not infer commitment from an ignored suggestion.
 
 ### 12.4 Resource limits without a turn cap
 
@@ -564,12 +564,13 @@ Do not count repeated copies from one source as independent. Weight direct user 
 
 ### 15.4 Read path
 
-1. Filter by user, usage policy, privacy, validity, and task purpose.
-2. Generate candidates through lexical, embedding, entity, temporal, and associative retrieval.
-3. Rerank by relevance, confidence, source diversity, recency, salience, applicability, and token cost.
-4. Return governed Statements plus Evidence summary and Belief state.
-5. Context assembly decides injection and external sending separately.
-6. Runtime records `retrieved`, `injected`, `applied`, and `sent_to_external_model` independently.
+1. Build a bounded attention cue from the current source Interaction and up to four recent user/assistant Messages; exclude System control and Tool protocol text.
+2. Filter by user, usage policy, privacy, validity, and conversational purpose.
+3. Generate candidates through lexical, embedding, entity, temporal, and associative retrieval.
+4. Rerank by relevance, confidence, source diversity, recency, salience, applicability, and token cost.
+5. Return at most five governed Statements plus Evidence summary and Belief state.
+6. Context assembly decides injection and external sending separately.
+7. Runtime records `retrieved`, `injected`, `applied`, and `sent_to_external_model` independently, linked to the source Interaction and Run rather than a generated Task objective.
 
 Retrieval is not application. Only explicit influence on response content, Tool parameters, planning constraints, or a user-confirmed decision reinforces use. Retrieved noise decays instead of self-amplifying.
 
@@ -579,7 +580,7 @@ Semantic encoding is local even when DeepSeek supplies chat completion. If Ollam
 
 ### 15.5 Write and consolidation
 
-Interaction may create a Candidate, never an unquestioned fact. Extract Claims after completed exchanges and explicit events, deduplicate by meaning/source, link Evidence, and promote under policy. Consolidation merges representations without erasing Evidence or conditions. Salience and association decay gradually; pinned user Memory remains until changed or deleted.
+Interaction may create a Candidate, never an unquestioned fact. Direct user requests to remember something cite the source Interaction. Extract Claims after completed exchanges and explicit events, deduplicate by meaning/source, link Evidence, and promote under policy. Consolidation merges representations without erasing Evidence or conditions. It runs at startup, through explicit maintenance, or in bounded background work—never synchronously on the recall path. Salience and association decay gradually; pinned user Memory remains until changed or deleted.
 
 ### 15.6 Correction, deletion, and export
 
@@ -634,19 +635,23 @@ Observatory displays component health, queue, provider/cache/usage, Run causalit
 
 ### 17.3 Episode
 
-An Episode is replay metadata for one Task/Run: objective/success criteria, input/content references, Context Manifest version, model/tool/Skill/Policy versions, safe lifecycle facts, Artifacts, Eval, Receipts, feedback, outcome, and deletion lineage. Building an Episode is asynchronous and cannot block delivery.
+An Episode is replay metadata for one Task/Run: objective/success criteria, input/content references, Context Manifest and Experience versions, model/tool/Skill/Policy versions, safe lifecycle facts, Artifacts, Eval, Receipts, feedback, outcome, and deletion lineage. Building an Episode is asynchronous and cannot block delivery.
 
 ### 17.4 Dataset governance
 
 An Episode becomes a Dataset Candidate only after purpose and user authorization. Promotion requires redaction, deduplication, labeling, quality review, leakage check, lineage, split assignment, and frozen checksum. Training and holdout cannot share an origin or derived duplicate. Deletion invalidates snapshots that reference the content.
 
-### 17.5 Guarded online evolution
+### 17.5 Versioned Experience evolution
 
-At least six eligible failure signals create a candidate experiment. Eligible evidence includes both pre-delivery non-Pass Eval and causally linked post-delivery correction, rejection, or failed/mixed real-world outcome; a pre-delivery Pass never erases later user evidence. Keep generation evidence separate from unseen holdout. Candidate scope is a small runtime instruction outside protected boundaries. An independent Judge compares candidate to baseline offline.
+Evolution owns one bounded prompt component named Experience. It does not edit the Agent kernel, Soul, Runtime context, Tool schemas, Memory, or user Messages. Experience contains short, cross-task lessons about investigation, execution, and verification. Each immutable release has an ID, monotonically increasing version, evidence lineage, offline review, state, and rollback history. Context Assembly selects it only after a Run exists and freezes the ID/version in that Run's Context Manifest. Checkpoint recovery reuses the frozen request.
 
-Release routing uses stable `release_id + task_id` hashing: a Canary receives approximately 20%; other Tasks use Active or baseline. The first non-Pass retires the Canary. Eight online Pass outcomes promote it and retire the previous Active. Every decision retains evidence and supports manual rollback. Evolution instructions are retrieved only through `InstructionForTask(ctx, taskID)` so routing cannot drift within a Task.
+Eligible evidence includes both pre-delivery non-Pass Eval and causally linked post-delivery correction, rejection, or failed/mixed real-world outcome; a pre-delivery Pass never erases later user evidence. Six eligible signals may start a proposal. The newest third, with at least two signals, is held out from generation. A proposal contains one or two complete replacement Experience lists, each with one to eight bullet lessons and no more than 1200 bytes. Deterministic validation enforces size, UTF-8, bullet structure, and prompt-delimiter isolation; it does not pretend keyword matching can judge authority semantics. An independent Judge compares candidate and baseline against unseen holdout evidence and owns semantic protected-boundary review. Candidate score must be at least 0.70, exceed baseline by at least 0.05, and contain no safety issue or regression.
 
-No candidate modifies Soul, authority, credentials, Memory truth rules, code, model weights, or an in-flight Task. Offline gain is experiment evidence, not a real-world intelligence claim.
+Release routing hashes `run_id + release_id`: approximately 20% of Runs receive the Canary and the others receive Active or the empty baseline. The generation Judge never sees Experience, which prevents the candidate from grading itself. The first Canary non-Pass retires it; eight Pass results promote it and retire the previous Active. A Run never changes Experience mid-flight. Every routing, signal, promotion, retirement, and manual rollback remains inspectable.
+
+Experience cannot modify Soul/personality, authority, credentials, privacy, local-first ownership, Memory truth, approval or Policy, Tool permissions/contracts, provider choice, delivery gates, user instructions, code, or model weights. It cannot copy task-specific facts or secrets. Offline gain is experiment evidence, not a real-world intelligence claim.
+
+Experience does not grow into a universal procedural prompt. When repeated evidence is domain-specific, evolution may identify a Skill opportunity instead. A Skill candidate is a separate governed artifact with portable `SKILL.md`, source evidence, version, protected-boundary review, and offline task evaluation. Creating or replacing a user Skill requires explicit user confirmation. No current Runtime path automatically writes or activates a Skill candidate; that deliberate boundary avoids turning self-evolution into unreviewed code or instruction installation.
 
 ## 18. Plugins and external authorization
 
@@ -707,7 +712,7 @@ Backup is an explicit user action and includes schema/version manifest, SQLite c
 
 ### 19.5 Logs and prompt injection
 
-Structured logs include time, level, component, operation, Task/Run/Invocation correlation, stable error code, latency, usage, and safe fields. They include startup, listener readiness, provider/cache/usage, Task claim/state, model dispatch/finish, Tool intent/dispatch/result/reconcile, approval, Eval, Outbox/Receipt, Memory retrieval/application, scheduler, Plugin, and shutdown.
+Structured logs include time, level, component, operation, Task/Run correlation and Tool-call or Effect IDs when applicable, stable error code, latency, usage, and safe fields. They include startup, listener readiness, provider/cache/usage, Task claim/state, model dispatch/finish, Tool intent/dispatch/result/reconcile, approval, Eval, Outbox/Receipt, Memory retrieval/application, scheduler, Plugin, and shutdown.
 
 Logs never include credentials, prompts, Message/attachment bodies, raw Tool Results, personal identifiers, Keychain output, or authorization URLs containing secrets. Runtime logs rotate with bounded size and retention. `doctor` reports the log paths and last startup diagnostic. `eri logs` tails the redacted daemon log and may filter by Task ID. `eri diagnose` writes a `0600` bounded ZIP containing a manifest, safe non-secret configuration, doctor output, and allowlisted redacted process logs; it excludes SQLite, Content Store objects, Messages, prompts, Tool bodies, and secrets and asks the user to review before sharing.
 
@@ -792,7 +797,7 @@ Ordinary proactive Messages enter silently; important/time-sensitive deliveries 
 
 ### 21.1 Read models
 
-Expose System Overview/Topology, Run Flow, Invocation, Context, Memory, Eval, Dataset/Episode, Evolution, and cost views. Read models provide governed summaries by default and ContentRefs only to authorized drill-down.
+Expose System Overview/Topology, Run Flow, model execution, Context, Memory, Eval, Dataset/Episode, Evolution, and cost views. Read models provide governed summaries by default and ContentRefs only to authorized drill-down.
 
 ### 21.2 Stability overview and execution canvas
 
@@ -865,7 +870,7 @@ Reference Plugin tests cover install, Manifest, authority, Invocation, Receipt, 
 
 ### 24.2 Required invariants
 
-1. Duplicate commands create no duplicate Step or side effect.
+1. Duplicate commands create no duplicate Run or side effect.
 2. Two workers cannot commit one Task simultaneously.
 3. Cancel/model-return race creates no new side effect.
 4. External write timeout becomes Unknown and reconciles.

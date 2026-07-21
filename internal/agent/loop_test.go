@@ -35,7 +35,7 @@ func TestAgentLoopContinuesPastFourNativeToolCallingTurns(t *testing.T) {
 		}},
 		MaxOutputTokens: 1024,
 	}
-	task := TaskContext{TaskID: "task", RunID: "run", InvocationID: "invocation"}
+	task := TaskContext{TaskID: "task", RunID: "run", ExecutionID: "invocation"}
 	state := loopState{TaskText: "research until complete", Trace: runTrace{}}
 
 	if err := service.continueLoop(context.Background(), task, request, map[string]string{"lookup": "lookup"}, state); err != nil {
@@ -103,7 +103,7 @@ func TestAgentLoopAdmitsNewUserInputWithoutCancelingInflightModelCall(t *testing
 	service := NewService(repository, contentStore, model, identity.Snapshot{}, "test-owner", nil, nil, LoopConfig{
 		MaxEvalAttempts: 3, MaxOutputTokens: 1024, Judge: loopTestJudge{},
 	})
-	task := TaskContext{TaskID: "task", RunID: "run", InvocationID: "invocation", InputSequence: 1}
+	task := TaskContext{TaskID: "task", RunID: "run", ExecutionID: "invocation", InputSequence: 1}
 	state := loopState{TaskText: "Plan the trip for Friday.", InputSequence: 1, Trace: runTrace{}}
 	request := ModelRequest{Messages: []Message{{Role: "user", Content: "Plan the trip for Friday."}}, MaxOutputTokens: 1024}
 
@@ -159,7 +159,7 @@ func TestAgentLoopSupersedesCandidateWhenAnotherTaskAdvancesConversation(t *test
 		MaxEvalAttempts: 3, MaxOutputTokens: 1024, Judge: loopTestJudge{},
 	})
 	capsule := execution.TaskCapsule{TaskID: "task", SourceInteractionID: "input-1", SourceKind: "text", SourceRole: "user"}
-	task := TaskContext{TaskID: "task", RunID: "run", InvocationID: "invocation", InputSequence: 1, CurrentTask: capsule}
+	task := TaskContext{TaskID: "task", RunID: "run", ExecutionID: "invocation", InputSequence: 1, CurrentTask: capsule}
 	state := loopState{
 		TaskText: "Finish the earlier task.", InputSequence: 1, ConversationSequence: 1, Trace: runTrace{},
 		ContextManifest: execution.ContextManifest{CurrentTask: &capsule, ConversationSequence: 1},
@@ -176,7 +176,7 @@ func TestAgentLoopSupersedesCandidateWhenAnotherTaskAdvancesConversation(t *test
 	for _, message := range model.requests[1].Messages {
 		joined += message.Content
 	}
-	if !strings.Contains(joined, "<conversation_update>") || !strings.Contains(joined, "not amendments") || strings.Contains(joined, "Friday plan ready.") {
+	if !strings.Contains(joined, "A later task corrected the shared factual premise.") || strings.Contains(joined, "<conversation_update>") || strings.Contains(joined, "Friday plan ready.") {
 		t.Fatalf("reconciled request=%+v", model.requests[1].Messages)
 	}
 	if repository.commit.BasisConversationSequence != 2 {
@@ -208,7 +208,7 @@ func TestAgentLoopDropsUnstartedToolFrameWhenNewInputArrivesAfterModelReturn(t *
 		Tools:           []ToolDefinition{{Name: "lookup", Description: "lookup", Parameters: map[string]any{"type": "object"}}},
 		MaxOutputTokens: 1024,
 	}
-	task := TaskContext{TaskID: "task", RunID: "run", InvocationID: "invocation", InputSequence: 1}
+	task := TaskContext{TaskID: "task", RunID: "run", ExecutionID: "invocation", InputSequence: 1}
 	state := loopState{TaskText: "Check the weather.", InputSequence: 1, Trace: runTrace{}}
 
 	if err := service.continueLoop(context.Background(), task, request, map[string]string{"lookup": "builtin.lookup"}, state); err != nil {
@@ -258,7 +258,7 @@ func TestAgentLoopClosesPartialToolFrameBeforeAdmittingNewInput(t *testing.T) {
 		Tools:           []ToolDefinition{{Name: "lookup", Description: "lookup", Parameters: map[string]any{"type": "object"}}},
 		MaxOutputTokens: 1024,
 	}
-	task := TaskContext{TaskID: "task", RunID: "run", InvocationID: "invocation", InputSequence: 1}
+	task := TaskContext{TaskID: "task", RunID: "run", ExecutionID: "invocation", InputSequence: 1}
 	state := loopState{TaskText: "Check two weather sources.", InputSequence: 1, Trace: runTrace{}}
 
 	if err := service.continueLoop(context.Background(), task, request, map[string]string{"lookup": "builtin.lookup"}, state); err != nil {
@@ -313,7 +313,7 @@ func TestAgentLoopCarriesSoulGuidedProfileIntoJudge(t *testing.T) {
 		TaskText: "It is finally fixed", Trace: runTrace{},
 	}
 
-	if err := service.continueLoop(context.Background(), TaskContext{TaskID: "task", RunID: "run", InvocationID: "invocation"}, request, map[string]string{"lookup": "lookup"}, state); err != nil {
+	if err := service.continueLoop(context.Background(), TaskContext{TaskID: "task", RunID: "run", ExecutionID: "invocation"}, request, map[string]string{"lookup": "lookup"}, state); err != nil {
 		t.Fatal(err)
 	}
 	if !judge.called {
@@ -340,7 +340,7 @@ func TestAgentLoopRecoversFromModelCheckpointWithoutRepeatingConfirmedEffect(t *
 		Tools:           []ToolDefinition{{Name: "lookup", Description: "lookup evidence", Parameters: map[string]any{"type": "object"}}},
 		MaxOutputTokens: 1024,
 	}
-	task := TaskContext{TaskID: "task", RunID: "run", InvocationID: "invocation"}
+	task := TaskContext{TaskID: "task", RunID: "run", ExecutionID: "invocation"}
 	state := loopState{TaskText: "perform one effect and finish", Trace: runTrace{}}
 
 	err = service.continueLoop(context.Background(), task, request, map[string]string{"lookup": "lookup"}, state)
@@ -393,7 +393,7 @@ func TestTaskCancellationRetainsEncryptedProviderTranscript(t *testing.T) {
 		{Role: "user", Content: "check one fact"},
 		{Role: "assistant", ReasoningContent: "reasoning-before-cancel", ToolCalls: []ToolCall{{ID: "call-1", Name: "lookup", Arguments: json.RawMessage(`{}`)}}},
 	}}
-	canceled, err := service.cancelIfRequested(context.Background(), TaskContext{TaskID: "task", RunID: "run", InvocationID: "invocation"}, request, &loopState{Trace: runTrace{}})
+	canceled, err := service.cancelIfRequested(context.Background(), TaskContext{TaskID: "task", RunID: "run", ExecutionID: "invocation"}, request, &loopState{Trace: runTrace{}})
 	if err != nil || !canceled {
 		t.Fatalf("cancel result=%v err=%v", canceled, err)
 	}
@@ -426,7 +426,7 @@ func TestTerminalFailureRetainsEncryptedProviderTranscript(t *testing.T) {
 		Tools:           []ToolDefinition{{Name: "lookup", Parameters: map[string]any{"type": "object"}}},
 		MaxOutputTokens: 1024,
 	}
-	err = service.continueLoop(context.Background(), TaskContext{TaskID: "task", RunID: "run", InvocationID: "invocation"}, request, map[string]string{"lookup": "lookup"}, loopState{})
+	err = service.continueLoop(context.Background(), TaskContext{TaskID: "task", RunID: "run", ExecutionID: "invocation"}, request, map[string]string{"lookup": "lookup"}, loopState{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -458,7 +458,7 @@ func TestAgentLoopRecoveryReplaysCompletedToolThenClosesRemainingFrameForNewInpu
 		Tools:           []ToolDefinition{{Name: "lookup", Description: "lookup", Parameters: map[string]any{"type": "object"}}},
 		MaxOutputTokens: 1024,
 	}
-	task := TaskContext{TaskID: "task", RunID: "run", InvocationID: "invocation", InputSequence: 1}
+	task := TaskContext{TaskID: "task", RunID: "run", ExecutionID: "invocation", InputSequence: 1}
 	state := loopState{TaskText: "Run two checks.", InputSequence: 1, Trace: runTrace{}}
 
 	err = service.continueLoop(context.Background(), task, request, map[string]string{"lookup": "builtin.lookup"}, state)
@@ -539,7 +539,7 @@ func TestApprovalResumeClosesDeniedAndSkippedToolCallsBeforeNewInput(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	task := TaskContext{TaskID: "task", RunID: "run", InvocationID: "invocation", InputSequence: 1}
+	task := TaskContext{TaskID: "task", RunID: "run", ExecutionID: "invocation", InputSequence: 1}
 	repository := &loopTestRepository{
 		inputs:          []ContextRecord{{ID: "input-2", Kind: "text", Sequence: 2, Role: "user", ContentRef: joinedRef}},
 		approvalClaimed: true,
@@ -589,7 +589,7 @@ func TestAgentLoopForcesOneEvidenceOnlySynthesisAfterVerifiedNoProgress(t *testi
 		Tools:           []ToolDefinition{{Name: "lookup", Description: "lookup evidence", Parameters: map[string]any{"type": "object"}}},
 		MaxOutputTokens: 1024,
 	}
-	task := TaskContext{TaskID: "task", RunID: "run", InvocationID: "invocation"}
+	task := TaskContext{TaskID: "task", RunID: "run", ExecutionID: "invocation"}
 	if err := service.continueLoop(context.Background(), task, request, map[string]string{"lookup": "lookup"}, loopState{TaskText: "find new evidence", Trace: runTrace{}}); err != nil {
 		t.Fatal(err)
 	}
@@ -623,7 +623,7 @@ func TestAgentLoopDeliversEvaluatedProgressWithoutEndingTask(t *testing.T) {
 		Tools:           []ToolDefinition{{Name: "lookup", Description: "lookup evidence", Parameters: map[string]any{"type": "object"}}},
 		MaxOutputTokens: 1024,
 	}
-	task := TaskContext{TaskID: "task", RunID: "run", InvocationID: "invocation"}
+	task := TaskContext{TaskID: "task", RunID: "run", ExecutionID: "invocation"}
 	if err := service.continueLoop(context.Background(), task, request, map[string]string{"lookup": "lookup"}, loopState{TaskText: "compare several options", Trace: runTrace{}}); err != nil {
 		t.Fatal(err)
 	}
@@ -674,7 +674,7 @@ func TestAgentLoopKeepsProviderToolProtocolValidWhileSynthesizingDeferredProgres
 		Tools:           []ToolDefinition{{Name: "delegate", Description: "delegate bounded work", Parameters: map[string]any{"type": "object"}}},
 		MaxOutputTokens: 1024,
 	}
-	task := TaskContext{TaskID: "task", RunID: "run", InvocationID: "invocation"}
+	task := TaskContext{TaskID: "task", RunID: "run", ExecutionID: "invocation"}
 	if err := service.continueLoop(context.Background(), task, request, map[string]string{"delegate": "builtin.delegate"}, loopState{TaskText: "delegate investigation", Trace: runTrace{}}); err != nil {
 		t.Fatal(err)
 	}
@@ -1014,7 +1014,7 @@ type loopTestRepository struct {
 func (r *loopTestRepository) ClaimTask(context.Context, string, string, time.Duration, string, string, string) (TaskContext, bool, error) {
 	return TaskContext{}, false, nil
 }
-func (r *loopTestRepository) MarkInvocationDispatched(context.Context, string) error { return nil }
+func (r *loopTestRepository) MarkRunDispatched(context.Context, string) error { return nil }
 func (r *loopTestRepository) CommitArtifact(_ context.Context, commit Commit) error {
 	r.commit = commit
 	return nil
@@ -1035,13 +1035,13 @@ func (r *loopTestRepository) PauseForSubagent(_ context.Context, commit Subagent
 func (r *loopTestRepository) ClaimSubagentResume(context.Context, string, string, time.Duration) (SubagentResume, bool, error) {
 	return SubagentResume{}, false, nil
 }
-func (r *loopTestRepository) UpdateInvocationContext(context.Context, string, string) error {
+func (r *loopTestRepository) UpdateRunContext(context.Context, string, string) error {
 	return nil
 }
 func (r *loopTestRepository) TaskCancelRequested(context.Context, string) (bool, error) {
 	return r.cancelRequested, nil
 }
-func (r *loopTestRepository) CommitTaskCancellation(_ context.Context, _, _, _ string, traceRef content.Ref, _ Usage) error {
+func (r *loopTestRepository) CommitTaskCancellation(_ context.Context, _, _ string, traceRef content.Ref, _ Usage) error {
 	r.cancellationTraceRef = traceRef
 	return nil
 }

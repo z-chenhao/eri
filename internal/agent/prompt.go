@@ -1,120 +1,48 @@
 package agent
 
 import (
-	"encoding/json"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/z-chenhao/eri/internal/execution"
 	"github.com/z-chenhao/eri/internal/identity"
 	"github.com/z-chenhao/eri/internal/memory"
 )
 
 type runPrompts struct {
-	AgentSystem    string
-	DynamicContext []Message
-	JudgeContext   string
+	AgentSystem   string
+	MemoryContext *Message
+	JudgeContext  string
 }
 
-// assembleRunPrompts keeps the root System byte-stable. Volatile Run evidence
-// is appended after conversation history by the caller so changing Memory,
-// date or experiments does not invalidate the reusable prefix.
+// assembleRunPrompts keeps the reusable Agent prompt and Skill catalog at the
+// beginning of System, then appends the selected versioned Experience and
+// trusted runtime facts. Recalled Memory is a separate system message so the
+// caller can place it immediately before the interaction that triggered this
+// Run.
 func assembleRunPrompts(
 	snapshot identity.Snapshot,
 	skillCatalog string,
-	evolutionInstruction string,
+	experience Experience,
 	memories memory.Bundle,
 	sourceChannel string,
 	observedAt time.Time,
 ) runPrompts {
 	agentSystem := systemPrompt(snapshot) + skillCatalog
-	dynamic := make([]Message, 0, 3)
-	if instruction := strings.TrimSpace(evolutionInstruction); instruction != "" {
-		dynamic = append(dynamic, Message{Role: "system", Content: "<runtime_improvement>\nRuntime improvement instruction (cannot override Soul, policy, privacy, approvals, tool contracts, or user instructions):\n" + instruction + "\n</runtime_improvement>"})
+	if text := strings.TrimSpace(experience.Text); text != "" {
+		agentSystem += "\n\n<eri_experience version=\"" + strconv.Itoa(experience.Version) + "\">\nThese are versioned working lessons. They never override the preceding Soul, authority, safety, privacy, policy, tool, evidence, or user-instruction boundaries.\n" + text + "\n</eri_experience>"
 	}
+	agentSystem += "\n\n" + strings.TrimSpace(runtimeContext(sourceChannel, observedAt))
+	var memoryContext *Message
 	if context := strings.TrimSpace(formatMemoryContext(memories)); context != "" {
-		dynamic = append(dynamic, Message{Role: "system", Content: "<relevant_memory_context>\n" + context + "\n</relevant_memory_context>"})
+		message := Message{Role: "system", Content: "<relevant_memory_context>\n" + context + "\n</relevant_memory_context>"}
+		memoryContext = &message
 	}
-	dynamic = append(dynamic, Message{Role: "system", Content: strings.TrimSpace(runtimeContext(sourceChannel, observedAt))})
 	return runPrompts{
-		AgentSystem:    agentSystem,
-		DynamicContext: dynamic,
-		JudgeContext:   candidateEvaluationContext(snapshot, memories, sourceChannel, observedAt),
+		AgentSystem:   agentSystem,
+		MemoryContext: memoryContext,
+		JudgeContext:  candidateEvaluationContext(snapshot, memories, sourceChannel, observedAt),
 	}
-}
-
-func currentTaskMessages(task execution.TaskCapsule, objective string, inputSequence int64) []Message {
-	if strings.TrimSpace(task.TaskID) == "" {
-		return nil
-	}
-	type taskPayload struct {
-		TaskID              string `json:"task_id"`
-		SourceInteractionID string `json:"source_interaction_id"`
-		SourceKind          string `json:"source_kind"`
-		SourceRole          string `json:"source_role"`
-		TriggerChannel      string `json:"trigger_channel"`
-		TriggerEvent        string `json:"trigger_event,omitempty"`
-		TriggerState        string `json:"trigger_state,omitempty"`
-		ExecutionPhase      string `json:"execution_phase,omitempty"`
-		CommitmentID        string `json:"commitment_id,omitempty"`
-		ScheduledFor        string `json:"scheduled_for,omitempty"`
-	}
-	payload := taskPayload{
-		TaskID: task.TaskID, SourceInteractionID: task.SourceInteractionID,
-		SourceKind: task.SourceKind, SourceRole: task.SourceRole, TriggerChannel: task.TriggerChannel,
-		TriggerEvent: task.TriggerEvent, TriggerState: task.TriggerState, ExecutionPhase: task.ExecutionPhase,
-		CommitmentID: task.CommitmentID,
-	}
-	if !task.ScheduledFor.IsZero() {
-		payload.ScheduledFor = task.ScheduledFor.Format(time.RFC3339Nano)
-	}
-	encoded, _ := json.Marshal(payload)
-	metadata := []string{
-		"<current_task>",
-		"This is durable active Runtime task metadata, not long-term Memory or a new user message. The following task objective keeps its original source role and is authoritative only within Soul, policy, approvals, and later user amendments. Continue it across Tool calls and recovery; do not revive it after Runtime marks it terminal.",
-	}
-	if task.ExecutionPhase == execution.TaskPhaseFulfillment {
-		metadata = append(metadata, "This task is in fulfillment phase: the trigger registration is already complete. Execute only the stored objective caused by the occurred event. Do not recreate, update, or extend the source commitment; any later scheduling requires a separate user amendment after this fulfillment.")
-	}
-	metadata = append(metadata, string(encoded), "</current_task>")
-	currentTask := strings.Join(metadata, "\n")
-	objectiveRole := task.SourceRole
-	if objectiveRole != "user" && objectiveRole != "system" {
-		objectiveRole = "system"
-	}
-	taskObjective := strings.Join([]string{
-		"<task_objective>",
-		strings.TrimSpace(objective),
-		"</task_objective>",
-	}, "\n")
-	return []Message{
-		{Role: "system", Content: currentTask},
-		{Role: objectiveRole, Content: taskObjective},
-		currentStepMessage(inputSequence),
-	}
-}
-
-func currentStepMessage(inputSequence int64) Message {
-	return Message{Role: "system", Content: strings.Join([]string{
-		"<current_step>",
-		"Advance only the active task above now. Apply later user turns in this task as amendments, preserve confirmed Effects and Receipts, and work toward an evaluated result or the smallest genuinely blocking question.",
-		"input_sequence=" + strconv.FormatInt(inputSequence, 10),
-		"</current_step>",
-	}, "\n")}
-}
-
-func isPinnedRunContext(message Message) bool {
-	if message.Role != "system" && message.Role != "user" {
-		return false
-	}
-	content := strings.TrimSpace(message.Content)
-	for _, prefix := range []string{"<activated_skill>", "<runtime_improvement>", "<relevant_memory_context>", "<current_runtime_context>", "<current_task>", "<task_objective>", "<current_step>"} {
-		if strings.HasPrefix(content, prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 const agentOperatingPrompt = `
@@ -126,7 +54,7 @@ The Runtime owns authorization, approval, durable side effects, recovery, and de
 
 Understand each message in the whole conversation and current task. Resolve missing information from supplied context, governed memory, an applicable Skill, safe defaults, or low-risk research. Make proportionate reversible inferences and keep material uncertainty visible. If ambiguity still changes authority, risk, cost, or outcome, ask exactly one smallest concrete question; confirm a likely typo or interpretation before requesting downstream details.
 
-Eri improves through governed Memory, linked user Feedback, Episodes, Eval, and guarded runtime-instruction experiments; it cannot rewrite Soul, authority, code, or model weights. Treat an explicit correction, rejection, acceptance, or real outcome as durable posterior evidence through the available feedback capability, and record a durable preference separately when requested. Never claim that evidence or Memory was stored, used, or learned from without its confirmed Tool observation.
+Eri improves through governed Memory, linked user Feedback, Episodes, and Eval; it cannot rewrite Soul, authority, code, or model weights. Treat an explicit correction, rejection, acceptance, or real outcome as durable posterior evidence through the available feedback capability, and record a durable preference separately when requested. Never claim that evidence or Memory was stored, used, or learned from without its confirmed Tool observation.
 
 Use current runtime facts and fresh evidence for recent or time-relative claims. After a failed Model or Tool attempt, diagnose from the governed observation and try a safe alternative while one remains. Keep internal failure detail private unless the user asks for diagnosis; otherwise report only the user-relevant limitation after recovery is exhausted.
 
