@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/z-chenhao/eri/internal/content"
@@ -56,6 +57,40 @@ func (*nativeTestModel) Complete(context.Context, ModelRequest) (ModelResponse, 
 }
 func (*nativeTestModel) Capabilities(context.Context) (ModelCapabilities, error) {
 	return ModelCapabilities{Text: true, ToolCalling: true, ContextTokens: 32768, MaxOutputTokens: 4096}, nil
+}
+
+type compactionCapturingModel struct{ request ModelRequest }
+
+func (m *compactionCapturingModel) Complete(_ context.Context, request ModelRequest) (ModelResponse, error) {
+	m.request = request
+	return ModelResponse{Message: Message{Role: "assistant", Content: "bounded summary"}}, nil
+}
+
+func (*compactionCapturingModel) Capabilities(context.Context) (ModelCapabilities, error) {
+	return ModelCapabilities{Text: true, ToolCalling: true, ContextTokens: 16_384, MaxOutputTokens: 4096}, nil
+}
+
+func TestDelegationCompactionDoesNotPromoteReasoningContentIntoSummary(t *testing.T) {
+	model := &compactionCapturingModel{}
+	messages := []Message{{
+		Role: "assistant", Content: strings.Repeat("evidence ", 800),
+		ReasoningContent: "provider-private-reasoning-marker",
+	}}
+	for range 3 {
+		messages = append(messages, Message{Role: "user", Content: strings.Repeat("older evidence ", 500)})
+	}
+	for range 8 {
+		messages = append(messages, Message{Role: "user", Content: "recent evidence"})
+	}
+	request := ModelRequest{Messages: messages, MaxOutputTokens: 1024}
+	usage := Usage{}
+	capabilities, _ := model.Capabilities(context.Background())
+	if err := compactDelegationContext(context.Background(), model, capabilities, &request, &usage); err != nil {
+		t.Fatal(err)
+	}
+	if len(model.request.Messages) != 1 || strings.Contains(model.request.Messages[0].Content, "provider-private-reasoning-marker") {
+		t.Fatalf("compaction promoted reasoning_content: %+v", model.request.Messages)
+	}
 }
 
 type nativeTestGateway struct{ descriptors []tool.Descriptor }

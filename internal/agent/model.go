@@ -18,11 +18,12 @@ import (
 // protocol. Assistant tool calls and their matching tool result IDs remain
 // first-class messages; they are never encoded into a synthetic decision.
 type Message struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	Images     []Image    `json:"images,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Role             string     `json:"role"`
+	Content          string     `json:"content,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	Images           []Image    `json:"images,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
 }
 
 type Image struct {

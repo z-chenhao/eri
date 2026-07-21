@@ -771,6 +771,7 @@ func estimateJudgeTokens(request JudgeRequest) int {
 
 func traceSafeMessage(message Message) Message {
 	copy := message
+	copy.ReasoningContent = ""
 	copy.Images = nil
 	copy.ToolCalls = make([]ToolCall, len(message.ToolCalls))
 	for index, call := range message.ToolCalls {
