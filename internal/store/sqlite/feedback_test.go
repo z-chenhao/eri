@@ -83,6 +83,71 @@ func TestCorrectiveFeedbackLinksDeliveryInvalidatesOldDerivedDataAndCandidatesRe
 	}
 }
 
+func TestCorrectiveFeedbackBeforeEpisodeBuildKeepsSourceEpisodeInvalidated(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	contentStore, err := content.New(filepath.Join(root, "content"), bytes.Repeat([]byte{0x44}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(root, "metadata", "eri.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := formatTime(time.Now().UTC())
+	for _, statement := range []string{
+		`INSERT INTO conversations(id, created_at) VALUES('conversation', '` + now + `')`,
+		`INSERT INTO tasks(id, conversation_id, source_interaction_id, source_channel, status, terminal_status, version, created_at, updated_at)
+		 VALUES('source-task', 'conversation', 'source-in', 'test', 'completed', 'completed', 1, '` + now + `', '` + now + `'),
+		       ('feedback-task', 'conversation', 'feedback-in', 'test', 'running', 'completed', 1, '` + now + `', '` + now + `')`,
+		`INSERT INTO runs(id, task_id, status, soul_version, started_at, ended_at)
+		 VALUES('source-run', 'source-task', 'succeeded', 'soul', '` + now + `', '` + now + `')`,
+		`INSERT INTO artifacts(id, task_id, run_id, version, kind, content_ref_json, status, trace_ref_json, created_at)
+		 VALUES('source-artifact', 'source-task', 'source-run', 1, 'reply', '{}', 'delivered', '{}', '` + now + `')`,
+		`INSERT INTO deliveries(id, task_id, artifact_id, target_channel, status, receipt, idempotency_key, terminal_status, created_at, updated_at)
+		 VALUES('source-delivery', 'source-task', 'source-artifact', 'test', 'sent', 'accepted', 'source-key', 'completed', '` + now + `', '` + now + `')`,
+	} {
+		if _, err := store.db.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service, err := feedback.NewService(store, contentStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Capture(ctx, "feedback-task", feedback.Correction, "", "The source answer needs correction.", ""); err != nil {
+		t.Fatal(err)
+	}
+	manifestRef, err := contentStore.Put(ctx, []byte(`{"task_id":"source-task"}`), content.Metadata{
+		MediaType: "application/json", EncryptionDomain: "episode", PrivacyClass: "private", RetentionPolicy: "user_owned",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.SaveEpisode(ctx, episode.Record{ID: "source-episode", TaskID: "source-task", ManifestRef: manifestRef, CreatedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != "invalidated" {
+		t.Fatalf("episode status=%q", record.Status)
+	}
+	var storedStatus string
+	if err := store.db.QueryRowContext(ctx, `SELECT status FROM episodes WHERE id='source-episode'`).Scan(&storedStatus); err != nil {
+		t.Fatal(err)
+	}
+	if storedStatus != "invalidated" {
+		t.Fatalf("stored episode status=%q", storedStatus)
+	}
+	var candidates int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM dataset_candidates WHERE episode_id='source-episode'`).Scan(&candidates); err != nil {
+		t.Fatal(err)
+	}
+	if candidates != 0 {
+		t.Fatalf("invalidated source dataset candidates=%d", candidates)
+	}
+}
+
 func TestFeedbackCannotReferenceDeliveryOutsideItsConversation(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

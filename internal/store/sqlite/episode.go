@@ -155,10 +155,20 @@ func (s *Store) SaveEpisode(ctx context.Context, record episode.Record) (episode
 	if err := insertContentRef(ctx, tx, record.ManifestRef, record.CreatedAt); err != nil {
 		return episode.Record{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO episodes(id, task_id, manifest_ref_json, status, created_at) VALUES(?, ?, ?, 'ready', ?)`, record.ID, record.TaskID, string(encodedRef), formatTime(record.CreatedAt)); err != nil {
+	var sourceCorrectiveFeedback int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM feedback_records
+		WHERE source_task_id = ? AND kind IN ('correction', 'rejected')`, record.TaskID).Scan(&sourceCorrectiveFeedback); err != nil {
 		return episode.Record{}, err
 	}
-	if err := appendEvent(ctx, tx, "episode", record.ID, "episode.built", map[string]any{"task_id": record.TaskID, "status": "ready"}, record.CreatedAt); err != nil {
+	record.Status = "ready"
+	if sourceCorrectiveFeedback > 0 {
+		record.Status = "invalidated"
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO episodes(id, task_id, manifest_ref_json, status, created_at) VALUES(?, ?, ?, ?, ?)`, record.ID, record.TaskID, string(encodedRef), record.Status, formatTime(record.CreatedAt)); err != nil {
+		return episode.Record{}, err
+	}
+	if err := appendEvent(ctx, tx, "episode", record.ID, "episode.built", map[string]any{"task_id": record.TaskID, "status": record.Status}, record.CreatedAt); err != nil {
 		return episode.Record{}, err
 	}
 	var correctiveFeedback int
@@ -167,7 +177,7 @@ func (s *Store) SaveEpisode(ctx context.Context, record episode.Record) (episode
 		WHERE feedback_task_id = ? AND kind IN ('correction', 'rejected')`, record.TaskID).Scan(&correctiveFeedback); err != nil {
 		return episode.Record{}, err
 	}
-	if correctiveFeedback > 0 {
+	if record.Status == "ready" && correctiveFeedback > 0 {
 		candidateID, err := identifier.New()
 		if err != nil {
 			return episode.Record{}, err
