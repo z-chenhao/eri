@@ -79,13 +79,19 @@ func TestCurrentTaskMessagesPreserveSchedulerProvenanceAndObjective(t *testing.T
 	scheduledFor := time.Date(2026, time.July, 21, 1, 0, 0, 0, time.UTC)
 	messages := currentTaskMessages(execution.TaskCapsule{
 		TaskID: "task-1", SourceInteractionID: "trigger-1", SourceKind: "internal_trigger",
-		SourceRole: "system", TriggerChannel: "scheduler", CommitmentID: "commitment-1",
+		SourceRole: "system", TriggerChannel: "scheduler", TriggerEvent: "commitment.due",
+		TriggerState: "occurred", CommitmentID: "commitment-1",
 		ScheduledFor: scheduledFor,
 	}, "Check the monitored sources for material changes.", 42)
 	if len(messages) != 3 || messages[0].Role != "system" || messages[1].Role != "system" || messages[2].Role != "system" {
 		t.Fatalf("current task messages = %+v", messages)
 	}
-	for _, expected := range []string{"<current_task>", `"source_role":"system"`, `"trigger_channel":"scheduler"`, `"commitment_id":"commitment-1"`, "2026-07-21T01:00:00Z"} {
+	for _, expected := range []string{
+		"<current_task>", `"source_role":"system"`, `"trigger_channel":"scheduler"`,
+		`"trigger_event":"commitment.due"`, `"trigger_state":"occurred"`,
+		`"commitment_id":"commitment-1"`, "2026-07-21T01:00:00Z",
+		"trigger event has already occurred", "not unfinished work to replay",
+	} {
 		if !strings.Contains(messages[0].Content, expected) {
 			t.Fatalf("current task is missing %q: %s", expected, messages[0].Content)
 		}
@@ -107,6 +113,9 @@ func TestCurrentTaskMessagesDoNotElevateUserObjectiveRole(t *testing.T) {
 	}
 	if strings.Contains(messages[0].Content, "Review this report") {
 		t.Fatalf("user objective was copied into Runtime system metadata: %s", messages[0].Content)
+	}
+	if strings.Contains(messages[0].Content, "not unfinished work to replay") {
+		t.Fatalf("direct user task was mislabeled as an occurred event: %s", messages[0].Content)
 	}
 }
 

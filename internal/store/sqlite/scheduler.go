@@ -56,13 +56,23 @@ func decodeCommitmentSchedule(body string) (scheduler.Schedule, scheduler.Delive
 
 func (s *Store) CommitmentDeliveryTarget(ctx context.Context, taskID string) (scheduler.DeliveryTarget, error) {
 	var target scheduler.DeliveryTarget
+	err := s.db.QueryRowContext(ctx, `
+		SELECT target_channel, target_conversation_id, reply_to_message_id, routing_mode
+		FROM commitment_fires WHERE task_id = ?`, taskID).
+		Scan(&target.Channel, &target.ConversationID, &target.ReplyToMessageID, &target.RoutingMode)
+	if err == nil {
+		return target, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return scheduler.DeliveryTarget{}, err
+	}
 	if err := s.db.QueryRowContext(ctx, `SELECT source_channel FROM tasks WHERE id = ?`, taskID).Scan(&target.Channel); err != nil {
 		return scheduler.DeliveryTarget{}, err
 	}
 	if target.Channel != "lark" {
 		return target, nil
 	}
-	err := s.db.QueryRowContext(ctx, `
+	err = s.db.QueryRowContext(ctx, `
 		SELECT cm.external_conversation_id, cm.external_message_id
 		FROM channel_messages cm JOIN interactions i ON i.id = cm.interaction_id
 		WHERE cm.channel = 'lark' AND cm.direction = 'inbound' AND i.task_id = ?

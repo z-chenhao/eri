@@ -5,6 +5,11 @@ package execution
 
 import "time"
 
+const (
+	TriggerEventCommitmentDue = "commitment.due"
+	TriggerStateOccurred      = "occurred"
+)
+
 // ModelCapabilities are provider facts that affect safe request assembly.
 // Providers report them before Eri sends any user context.
 type ModelCapabilities struct {
@@ -54,6 +59,8 @@ type TaskCapsule struct {
 	SourceKind          string    `json:"source_kind"`
 	SourceRole          string    `json:"source_role"`
 	TriggerChannel      string    `json:"trigger_channel"`
+	TriggerEvent        string    `json:"trigger_event,omitempty"`
+	TriggerState        string    `json:"trigger_state,omitempty"`
 	CommitmentID        string    `json:"commitment_id,omitempty"`
 	ScheduledFor        time.Time `json:"scheduled_for,omitempty"`
 }

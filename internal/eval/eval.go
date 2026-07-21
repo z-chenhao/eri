@@ -47,6 +47,9 @@ func (d Decision) Validate() error {
 	if d.Result != Pass && len(d.Findings) == 0 {
 		return fmt.Errorf("%s requires at least one finding", d.Result)
 	}
+	if d.Result == Pass && len(d.Findings) != 0 {
+		return fmt.Errorf("pass cannot include findings")
+	}
 	if len(d.Findings) > 20 {
 		return fmt.Errorf("findings exceed limit")
 	}

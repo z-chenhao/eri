@@ -65,12 +65,23 @@ func TestCommitmentFirePreservesCreatingLarkTarget(t *testing.T) {
 	}
 	if claimedTask.CurrentTask.TaskID != fireTaskID || claimedTask.CurrentTask.CommitmentID != commitment.ID ||
 		claimedTask.CurrentTask.SourceKind != "internal_trigger" || claimedTask.CurrentTask.SourceRole != "system" ||
-		claimedTask.CurrentTask.TriggerChannel != "scheduler" || !claimedTask.CurrentTask.ScheduledFor.Equal(commitment.NextRunAt) {
+		claimedTask.CurrentTask.TriggerChannel != "scheduler" || claimedTask.CurrentTask.TriggerEvent != "commitment.due" ||
+		claimedTask.CurrentTask.TriggerState != "occurred" || !claimedTask.CurrentTask.ScheduledFor.Equal(commitment.NextRunAt) {
 		t.Fatalf("scheduled task capsule = %+v", claimedTask.CurrentTask)
 	}
 	objective, err := contentStore.Get(ctx, claimedTask.ObjectiveRef)
 	if err != nil || !bytes.Contains(objective, []byte("Go to the bathroom")) {
 		t.Fatalf("scheduled task objective=%q err=%v", objective, err)
+	}
+	followUp, err := service.Create(ctx, fireTaskID, scheduler.CreateRequest{
+		Message: "Follow up on the event outcome", Schedule: scheduler.Schedule{Type: "once", At: time.Now().UTC().Add(2 * time.Minute)},
+	})
+	if err != nil {
+		t.Fatalf("create follow-up from event task: %v", err)
+	}
+	if followUp.Target.Channel != "lark" || followUp.Target.ConversationID != "oc_owner_chat" ||
+		followUp.Target.ReplyToMessageID != "om_create_reminder" || followUp.Target.RoutingMode != scheduler.DeliveryRouteOrigin {
+		t.Fatalf("event task follow-up target = %+v", followUp.Target)
 	}
 	now := formatTime(time.Now().UTC())
 	for _, statement := range []string{

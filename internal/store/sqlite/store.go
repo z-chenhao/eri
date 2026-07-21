@@ -688,6 +688,10 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 			return agent.TaskContext{}, false, fmt.Errorf("parse task scheduled time: %w", err)
 		}
 	}
+	if currentTask.CommitmentID != "" {
+		currentTask.TriggerEvent = execution.TriggerEventCommitmentDue
+		currentTask.TriggerState = execution.TriggerStateOccurred
+	}
 	recovering := currentStatus == "running" && leaseUntil != "" && leaseUntil < formatTime(now)
 	if currentStatus != "queued" && !recovering {
 		return agent.TaskContext{}, false, nil

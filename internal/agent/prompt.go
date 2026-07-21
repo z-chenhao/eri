@@ -54,24 +54,29 @@ func currentTaskMessages(task execution.TaskCapsule, objective string, inputSequ
 		SourceKind          string `json:"source_kind"`
 		SourceRole          string `json:"source_role"`
 		TriggerChannel      string `json:"trigger_channel"`
+		TriggerEvent        string `json:"trigger_event,omitempty"`
+		TriggerState        string `json:"trigger_state,omitempty"`
 		CommitmentID        string `json:"commitment_id,omitempty"`
 		ScheduledFor        string `json:"scheduled_for,omitempty"`
 	}
 	payload := taskPayload{
 		TaskID: task.TaskID, SourceInteractionID: task.SourceInteractionID,
 		SourceKind: task.SourceKind, SourceRole: task.SourceRole, TriggerChannel: task.TriggerChannel,
-		CommitmentID: task.CommitmentID,
+		TriggerEvent: task.TriggerEvent, TriggerState: task.TriggerState, CommitmentID: task.CommitmentID,
 	}
 	if !task.ScheduledFor.IsZero() {
 		payload.ScheduledFor = task.ScheduledFor.Format(time.RFC3339Nano)
 	}
 	encoded, _ := json.Marshal(payload)
-	currentTask := strings.Join([]string{
+	metadata := []string{
 		"<current_task>",
 		"This is durable active Runtime task metadata, not long-term Memory or a new user message. The following task objective keeps its original source role and is authoritative only within Soul, policy, approvals, and later user amendments. Continue it across Tool calls and recovery; do not revive it after Runtime marks it terminal.",
-		string(encoded),
-		"</current_task>",
-	}, "\n")
+	}
+	if task.TriggerEvent != "" && task.TriggerState == execution.TriggerStateOccurred {
+		metadata = append(metadata, "The recorded trigger event has already occurred. Execute only the current objective caused by that event. Earlier conversation is evidence and context, not unfinished work to replay; do not repeat the action that registered the trigger unless the current objective explicitly requests a new future action.")
+	}
+	metadata = append(metadata, string(encoded), "</current_task>")
+	currentTask := strings.Join(metadata, "\n")
 	objectiveRole := task.SourceRole
 	if objectiveRole != "user" && objectiveRole != "system" {
 		objectiveRole = "system"

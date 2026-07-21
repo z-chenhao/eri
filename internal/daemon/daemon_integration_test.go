@@ -732,11 +732,18 @@ func (m *reminderBehaviorModel) Complete(_ context.Context, request agent.ModelR
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: "I will remind you to check your travel documents on time."}, FinishReason: "stop", Usage: agent.Usage{Provider: "fake", Model: "reminder", ModelCalls: 1}}, nil
 	case 3:
 		foundTrigger := false
+		foundOccurredEventFrame := false
 		for _, message := range request.Messages {
 			foundTrigger = foundTrigger || strings.Contains(message.Content, "A durable commitment is due") && strings.Contains(message.Content, "Check travel documents")
+			foundOccurredEventFrame = foundOccurredEventFrame || strings.Contains(message.Content, `"trigger_event":"commitment.due"`) &&
+				strings.Contains(message.Content, `"trigger_state":"occurred"`) &&
+				strings.Contains(message.Content, "not unfinished work to replay")
 		}
 		if !foundTrigger {
 			return agent.ModelResponse{}, fmt.Errorf("durable trigger context missing: %+v", request.Messages)
+		}
+		if !foundOccurredEventFrame {
+			return agent.ModelResponse{}, fmt.Errorf("occurred event task frame missing: %+v", request.Messages)
 		}
 		return agent.ModelResponse{
 			Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
@@ -2029,6 +2036,13 @@ func TestDaemonCommitmentSurvivesRestartAndDeliversProactiveReminder(t *testing.
 	notifications := notifier.snapshot()
 	if len(notifications) != 1 || notifications[0] != "Eri reminder\nIt is time to check your travel documents" {
 		t.Fatalf("notifications = %#v", notifications)
+	}
+	commitments, err := second.store.ListCommitments(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commitments) != 1 || commitments[0].Status != "completed" {
+		t.Fatalf("event delivery replayed the historical scheduling request: %+v", commitments)
 	}
 	assertDataRootDoesNotContain(t, dataRoot, []byte("Check travel documents"))
 }

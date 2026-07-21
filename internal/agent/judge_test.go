@@ -112,6 +112,7 @@ func TestModelJudgeFailsClosedOnInvalidProtocol(t *testing.T) {
 		{name: "not json", response: ModelResponse{Message: Message{Content: "looks fine"}}},
 		{name: "unknown result", response: ModelResponse{Message: Message{Content: `{"result":"maybe","tier":"routine","findings":[]}`}}},
 		{name: "finding required", response: ModelResponse{Message: Message{Content: `{"result":"repair","tier":"routine","findings":[]}`}}},
+		{name: "pass contradicts finding", response: ModelResponse{Message: Message{Content: `{"result":"pass","tier":"routine","findings":["The claim is not confirmed by the Tool result."]}`}}},
 		{name: "tool call", response: ModelResponse{Message: Message{ToolCalls: []ToolCall{{ID: "x", Name: "builtin.web", Arguments: []byte(`{}`)}}}}},
 	}
 	for _, test := range tests {
