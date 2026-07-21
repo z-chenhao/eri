@@ -285,12 +285,16 @@ type toolResultTrace struct {
 }
 
 type runTrace struct {
-	ModelTurns   []modelTurnTrace  `json:"model_turns"`
-	ToolCalls    []toolResultTrace `json:"tool_calls"`
-	Evaluations  []evaluationTrace `json:"evaluations"`
-	Progress     []progressTrace   `json:"progress,omitempty"`
-	RuntimeStop  string            `json:"runtime_stop,omitempty"`
-	FailureCause string            `json:"failure_cause,omitempty"`
+	// ProviderTranscript is the authoritative provider-native request at the
+	// durable boundary. It remains encrypted and user-owned with the Run trace;
+	// Observatory decodes only the safe fields below.
+	ProviderTranscript *ModelRequest     `json:"provider_transcript,omitempty"`
+	ModelTurns         []modelTurnTrace  `json:"model_turns"`
+	ToolCalls          []toolResultTrace `json:"tool_calls"`
+	Evaluations        []evaluationTrace `json:"evaluations"`
+	Progress           []progressTrace   `json:"progress,omitempty"`
+	RuntimeStop        string            `json:"runtime_stop,omitempty"`
+	FailureCause       string            `json:"failure_cause,omitempty"`
 }
 
 type progressTrace struct {
@@ -659,7 +663,7 @@ func (s *Service) resumeAgentCheckpoint(ctx context.Context, task TaskContext, c
 	s.restoreJudgeContext(task, &continuation)
 	if !sameStringMap(continuation.ModelToolIDs, currentToolIDs) {
 		continuation.State.Trace.RuntimeStop = "tool_surface_changed_during_recovery"
-		return s.commitFailure(ctx, task, continuation.State.Usage, "tool_surface_changed_during_recovery", continuation.State.Trace)
+		return s.commitFailure(ctx, task, continuation.State.Usage, "tool_surface_changed_during_recovery", traceWithProviderTranscript(continuation.State.Trace, continuation.Request))
 	}
 	switch task.CheckpointPhase {
 	case "ready_for_model":
@@ -920,7 +924,7 @@ func (s *Service) pauseForSubagent(ctx context.Context, task TaskContext, state 
 	}
 	result, gateFindings := eval.Routine(body)
 	if result != eval.Pass {
-		return s.commitFailure(ctx, task, state.Usage, "subagent_progress_eval_failed", state.Trace)
+		return s.commitFailure(ctx, task, state.Usage, "subagent_progress_eval_failed", traceWithProviderTranscript(state.Trace, request))
 	}
 	artifactID, err := identifier.New()
 	if err != nil {

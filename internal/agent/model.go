@@ -57,6 +57,22 @@ type ModelResponse struct {
 	Usage        Usage   `json:"usage"`
 }
 
+func snapshotModelRequest(request ModelRequest) ModelRequest {
+	cloned := request
+	cloned.Messages = make([]Message, len(request.Messages))
+	for index, message := range request.Messages {
+		cloned.Messages[index] = message
+		cloned.Messages[index].Images = append([]Image(nil), message.Images...)
+		cloned.Messages[index].ToolCalls = make([]ToolCall, len(message.ToolCalls))
+		for callIndex, call := range message.ToolCalls {
+			cloned.Messages[index].ToolCalls[callIndex] = call
+			cloned.Messages[index].ToolCalls[callIndex].Arguments = append(json.RawMessage(nil), call.Arguments...)
+		}
+	}
+	cloned.Tools = append([]ToolDefinition(nil), request.Tools...)
+	return cloned
+}
+
 // ModelCapabilities is the agent-facing name for provider facts owned by the
 // execution domain and shared with durable runtime projections.
 type ModelCapabilities = execution.ModelCapabilities

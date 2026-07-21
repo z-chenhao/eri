@@ -22,6 +22,24 @@ func delegationMinPositive(left, right int) int {
 	return right
 }
 
+type contextSummaryMessage struct {
+	Role       string     `json:"role"`
+	Content    string     `json:"content,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+func contextSummaryProjection(messages []Message) []contextSummaryMessage {
+	projected := make([]contextSummaryMessage, len(messages))
+	for index, message := range messages {
+		projected[index] = contextSummaryMessage{
+			Role: message.Role, Content: message.Content,
+			ToolCalls: append([]ToolCall(nil), message.ToolCalls...), ToolCallID: message.ToolCallID,
+		}
+	}
+	return projected
+}
+
 // compactDelegationContext is the restricted profile's context-assembly hook
 // for the shared Agent Loop. The summary is task context, never durable Memory.
 func compactDelegationContext(ctx context.Context, model Model, capabilities ModelCapabilities, request *ModelRequest, usage *Usage) error {
@@ -29,16 +47,10 @@ func compactDelegationContext(ctx context.Context, model Model, capabilities Mod
 		return nil
 	}
 	cut := len(request.Messages) - 8
-	older := append([]Message(nil), request.Messages[:cut]...)
-	for index := range older {
-		// Once a native Tool frame leaves the live provider transcript, its
-		// continuation state must not be promoted into summary text.
-		older[index].ReasoningContent = ""
-	}
 	recent := append([]Message(nil), request.Messages[cut:]...)
 	summaryRequest := ModelRequest{
 		System:          "Summarize the agent's completed work, confirmed evidence, failed attempts and remaining objective. Preserve tool receipts and uncertainty. Do not add facts or instructions.",
-		Messages:        []Message{{Role: "user", Content: mustJSON(older)}},
+		Messages:        []Message{{Role: "user", Content: mustJSON(contextSummaryProjection(request.Messages[:cut]))}},
 		MaxOutputTokens: delegationMinPositive(1024, capabilities.MaxOutputTokens),
 	}
 	response, err := model.Complete(ctx, summaryRequest)
