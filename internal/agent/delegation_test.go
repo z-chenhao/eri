@@ -79,9 +79,10 @@ func TestDelegationCompactionDoesNotPromoteReasoningContentIntoSummary(t *testin
 	for range 3 {
 		messages = append(messages, Message{Role: "user", Content: strings.Repeat("older evidence ", 500)})
 	}
-	for range 8 {
+	for range 7 {
 		messages = append(messages, Message{Role: "user", Content: "recent evidence"})
 	}
+	messages = append(messages, Message{Role: "assistant", Content: "recent evidence", ReasoningContent: "recent-provider-continuation"})
 	request := ModelRequest{Messages: messages, MaxOutputTokens: 1024}
 	usage := Usage{}
 	capabilities, _ := model.Capabilities(context.Background())
@@ -90,6 +91,9 @@ func TestDelegationCompactionDoesNotPromoteReasoningContentIntoSummary(t *testin
 	}
 	if len(model.request.Messages) != 1 || strings.Contains(model.request.Messages[0].Content, "provider-private-reasoning-marker") {
 		t.Fatalf("compaction promoted reasoning_content: %+v", model.request.Messages)
+	}
+	if request.Messages[len(request.Messages)-1].ReasoningContent != "recent-provider-continuation" {
+		t.Fatalf("compaction removed continuation from retained provider context: %+v", request.Messages)
 	}
 }
 

@@ -234,7 +234,7 @@ func (n *NativeSubagent) HandleRun(ctx context.Context, item runtime.OutboxItem)
 		model: n.model, tools: n.tools, logger: n.logger,
 		loop:    LoopConfig{MaxOutputTokens: n.maxOut, ExternalModel: n.external, Budget: n.budget, ModelTarget: n.modelTarget},
 		compact: n.compact,
-		cancel: func(checkCtx context.Context, _ TaskContext, _ *loopState) (bool, error) {
+		cancel: func(checkCtx context.Context, _ TaskContext, _ ModelRequest, _ *loopState) (bool, error) {
 			canceled, checkErr := n.repository.SubagentRunCancellationRequested(checkCtx, job.ID)
 			if checkErr != nil || !canceled {
 				return false, checkErr
@@ -265,7 +265,7 @@ func (n *NativeSubagent) HandleRun(ctx context.Context, item runtime.OutboxItem)
 			}
 			return request, false, n.finish(doneCtx, job, "completed", "", body, state)
 		},
-		fail: func(failCtx context.Context, _ TaskContext, _ Usage, code string, stateTrace runTrace) error {
+		fail: func(failCtx context.Context, _ TaskContext, _ ModelRequest, _ Usage, code string, stateTrace runTrace) error {
 			return n.finish(failCtx, job, "failed", code, "The Intern could not complete the assigned work.", &loopState{Trace: stateTrace})
 		},
 	}

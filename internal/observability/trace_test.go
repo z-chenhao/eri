@@ -44,6 +44,31 @@ func (c traceContent) Get(_ context.Context, ref content.Ref) ([]byte, error) {
 	return append([]byte(nil), c[ref.ObjectID]...), nil
 }
 
+func TestHydrateLoopTraceDoesNotProjectProviderTranscript(t *testing.T) {
+	t.Parallel()
+	marker := "provider-reasoning-must-not-reach-observatory"
+	detail := RunDetail{
+		Run:       RunSummary{ID: "run-1"},
+		Artifacts: []Artifact{{TraceRef: content.Ref{ObjectID: "trace-1"}}},
+	}
+	stored := []byte(`{
+		"provider_transcript":{"system":"private system","messages":[{"role":"assistant","reasoning_content":"` + marker + `"}]},
+		"model_turns":[{"id":"inv-1:turn:1","ordinal":1,"trigger":"initial_request","status":"succeeded","request":{},"assistant":{},"usage":{}}],
+		"tool_calls":[],"evaluations":[]
+	}`)
+	service := NewService(&traceRepository{}, traceContent{"trace-1": stored})
+	if err := service.hydrateLoopTrace(context.Background(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	projected, err := json.Marshal(detail.loopTrace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.loopTrace.ModelTurns) != 1 || strings.Contains(string(projected), marker) || strings.Contains(string(projected), "private system") {
+		t.Fatalf("safe observability projection exposed provider transcript: %s", projected)
+	}
+}
+
 func TestRunSpansPreserveFanOutFanInAndMemoryStages(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 7, 18, 3, 0, 0, 0, time.UTC)

@@ -331,6 +331,63 @@ func TestAgentLoopRecoversFromModelCheckpointWithoutRepeatingConfirmedEffect(t *
 	if len(trace.ModelTurns) == 0 || trace.ModelTurns[0].Message.ReasoningContent != "" {
 		t.Fatalf("safe final trace retained reasoning_content: %+v", trace.ModelTurns)
 	}
+	if trace.ProviderTranscript == nil || len(trace.ProviderTranscript.Messages) < 2 || trace.ProviderTranscript.Messages[1].ReasoningContent != "reasoning-1" {
+		t.Fatalf("encrypted provider transcript lost reasoning_content: %+v", trace.ProviderTranscript)
+	}
+}
+
+func TestTaskCancellationRetainsEncryptedProviderTranscript(t *testing.T) {
+	contentStore, err := content.New(t.TempDir(), []byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &loopTestRepository{cancelRequested: true}
+	service := &Service{repository: repository, content: contentStore}
+	request := ModelRequest{Messages: []Message{
+		{Role: "user", Content: "check one fact"},
+		{Role: "assistant", ReasoningContent: "reasoning-before-cancel", ToolCalls: []ToolCall{{ID: "call-1", Name: "lookup", Arguments: json.RawMessage(`{}`)}}},
+	}}
+	canceled, err := service.cancelIfRequested(context.Background(), TaskContext{TaskID: "task", RunID: "run", InvocationID: "invocation"}, request, &loopState{Trace: runTrace{}})
+	if err != nil || !canceled {
+		t.Fatalf("cancel result=%v err=%v", canceled, err)
+	}
+	body, err := contentStore.Get(context.Background(), repository.cancellationTraceRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var trace runTrace
+	if err := json.Unmarshal(body, &trace); err != nil {
+		t.Fatal(err)
+	}
+	if trace.ProviderTranscript == nil || len(trace.ProviderTranscript.Messages) != 2 || trace.ProviderTranscript.Messages[1].ReasoningContent != "reasoning-before-cancel" {
+		t.Fatalf("canceled Run lost provider transcript: %+v", trace.ProviderTranscript)
+	}
+}
+
+func TestTerminalFailureRetainsEncryptedProviderTranscript(t *testing.T) {
+	contentStore, err := content.New(t.TempDir(), []byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &loopTestRepository{}
+	service := NewService(repository, contentStore, failingLoopModel{}, identity.Snapshot{}, "test-owner", loopTestToolGateway{}, nil, LoopConfig{MaxOutputTokens: 1024})
+	request := ModelRequest{
+		Messages: []Message{
+			{Role: "user", Content: "continue from the observation"},
+			{Role: "assistant", ReasoningContent: "reasoning-before-failure", ToolCalls: []ToolCall{{ID: "call-1", Name: "lookup", Arguments: json.RawMessage(`{}`)}}},
+			{Role: "tool", ToolCallID: "call-1", Content: `{"found":true}`},
+		},
+		Tools:           []ToolDefinition{{Name: "lookup", Parameters: map[string]any{"type": "object"}}},
+		MaxOutputTokens: 1024,
+	}
+	err = service.continueLoop(context.Background(), TaskContext{TaskID: "task", RunID: "run", InvocationID: "invocation"}, request, map[string]string{"lookup": "lookup"}, loopState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := readCommittedLoopTrace(t, contentStore, repository)
+	if repository.commit.TerminalStatus != "failed" || trace.ProviderTranscript == nil || len(trace.ProviderTranscript.Messages) != 3 || trace.ProviderTranscript.Messages[1].ReasoningContent != "reasoning-before-failure" {
+		t.Fatalf("failed Run did not retain provider transcript: commit=%+v transcript=%+v", repository.commit, trace.ProviderTranscript)
+	}
 }
 
 func TestAgentLoopRecoveryReplaysCompletedToolThenClosesRemainingFrameForNewInput(t *testing.T) {
@@ -590,6 +647,16 @@ type loopTestModel struct {
 	toolTurns int
 	calls     int
 	requests  []ModelRequest
+}
+
+type failingLoopModel struct{}
+
+func (failingLoopModel) Complete(context.Context, ModelRequest) (ModelResponse, error) {
+	return ModelResponse{}, fmt.Errorf("provider unavailable")
+}
+
+func (failingLoopModel) Capabilities(context.Context) (ModelCapabilities, error) {
+	return ModelCapabilities{Text: true, ToolCalling: true, ContextTokens: 32_768, MaxOutputTokens: 4_096}, nil
 }
 
 type stagnantLoopModel struct{ calls int }
@@ -877,16 +944,18 @@ func (j *interpersonalCapturingJudge) Evaluate(_ context.Context, request JudgeR
 }
 
 type loopTestRepository struct {
-	commit           Commit
-	progress         []ProgressCommit
-	checkpointRef    content.Ref
-	checkpointPhase  string
-	checkpointSaves  int
-	failCheckpointAt int
-	inputs           []ContextRecord
-	approvalResume   ApprovalResume
-	approvalClaimed  bool
-	subagentWait     SubagentWaitCommit
+	commit               Commit
+	progress             []ProgressCommit
+	checkpointRef        content.Ref
+	checkpointPhase      string
+	checkpointSaves      int
+	failCheckpointAt     int
+	inputs               []ContextRecord
+	approvalResume       ApprovalResume
+	approvalClaimed      bool
+	subagentWait         SubagentWaitCommit
+	cancelRequested      bool
+	cancellationTraceRef content.Ref
 }
 
 func (r *loopTestRepository) ClaimTask(context.Context, string, string, time.Duration, string, string, string) (TaskContext, bool, error) {
@@ -917,9 +986,10 @@ func (r *loopTestRepository) UpdateInvocationContext(context.Context, string, st
 	return nil
 }
 func (r *loopTestRepository) TaskCancelRequested(context.Context, string) (bool, error) {
-	return false, nil
+	return r.cancelRequested, nil
 }
-func (r *loopTestRepository) CommitTaskCancellation(context.Context, string, string, string, content.Ref, Usage) error {
+func (r *loopTestRepository) CommitTaskCancellation(_ context.Context, _, _, _ string, traceRef content.Ref, _ Usage) error {
+	r.cancellationTraceRef = traceRef
 	return nil
 }
 

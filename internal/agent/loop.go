@@ -32,12 +32,12 @@ type loopDriver struct {
 	}
 	compact    func(context.Context, TaskContext, ModelRequest, ModelCapabilities, *loopState) (ModelRequest, Usage, error)
 	refresh    func(context.Context, TaskContext, *ModelRequest, *loopState) (bool, error)
-	cancel     func(context.Context, TaskContext, *loopState) (bool, error)
+	cancel     func(context.Context, TaskContext, ModelRequest, *loopState) (bool, error)
 	checkpoint func(context.Context, TaskContext, string, pendingContinuation) error
 	progress   func(context.Context, TaskContext, ModelRequest, *loopState, string) error
 	execute    func(context.Context, TaskContext, *ModelRequest, []ToolCall, map[string]string, *loopState, *tool.Grant) (bool, error)
 	candidate  func(context.Context, TaskContext, ModelRequest, map[string]string, *loopState) (ModelRequest, bool, error)
-	fail       func(context.Context, TaskContext, Usage, string, runTrace) error
+	fail       func(context.Context, TaskContext, ModelRequest, Usage, string, runTrace) error
 }
 
 func (s *Service) continueLoop(ctx context.Context, task TaskContext, request ModelRequest, modelToolIDs map[string]string, state loopState) error {
@@ -46,7 +46,8 @@ func (s *Service) continueLoop(ctx context.Context, task TaskContext, request Mo
 		compact: s.compactLoopContext, refresh: s.refreshTaskInputs, cancel: s.cancelIfRequested, checkpoint: s.saveAgentCheckpoint,
 		progress: s.commitIntermediateProgress,
 		execute:  s.executeCalls, candidate: s.evaluateAndCommitCandidate,
-		fail: func(ctx context.Context, task TaskContext, usage Usage, code string, trace runTrace) error {
+		fail: func(ctx context.Context, task TaskContext, request ModelRequest, usage Usage, code string, trace runTrace) error {
+			trace = traceWithProviderTranscript(trace, request)
 			if trace.RuntimeStop == "" {
 				trace.RuntimeStop = code
 			}
@@ -68,7 +69,7 @@ func runAgentLoop(ctx context.Context, driver loopDriver, task TaskContext, requ
 		if driver.refresh != nil {
 			changed, err := driver.refresh(ctx, task, &request, &state)
 			if err != nil {
-				return driver.fail(ctx, task, state.Usage, "task_input_unavailable", state.Trace)
+				return driver.fail(ctx, task, request, state.Usage, "task_input_unavailable", state.Trace)
 			}
 			if changed {
 				state.NextTurnTrigger = "user_input"
@@ -77,7 +78,7 @@ func runAgentLoop(ctx context.Context, driver loopDriver, task TaskContext, requ
 		if state.Capabilities.ContextTokens == 0 {
 			capabilities, err := capabilitiesFor(ctx, driver.model)
 			if err != nil {
-				return driver.fail(ctx, task, state.Usage, "provider_capabilities_unavailable", state.Trace)
+				return driver.fail(ctx, task, request, state.Usage, "provider_capabilities_unavailable", state.Trace)
 			}
 			state.Capabilities = capabilities
 		}
@@ -86,17 +87,17 @@ func runAgentLoop(ctx context.Context, driver loopDriver, task TaskContext, requ
 		if err != nil {
 			driver.logger.Warn("in-run context compaction failed", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "invocation_id", task.InvocationID, "error_code", observability.ErrorCode(err), "error", observability.SafeError(err))
 			state.Trace.RuntimeStop = "context_compaction_failed"
-			return driver.fail(ctx, task, state.Usage, "context_compaction_failed", state.Trace)
+			return driver.fail(ctx, task, request, state.Usage, "context_compaction_failed", state.Trace)
 		}
 		request = compacted
-		canceled, err := driver.cancel(ctx, task, &state)
+		canceled, err := driver.cancel(ctx, task, request, &state)
 		if err != nil || canceled {
 			return err
 		}
 		if err := validateModelTranscript(request.Messages); err != nil {
 			state.Trace.RuntimeStop = "invalid_model_transcript"
 			driver.logger.Warn("model request withheld because its tool protocol is invalid", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "invocation_id", task.InvocationID, "error_code", "invalid_model_transcript", "error", err.Error())
-			return driver.fail(ctx, task, state.Usage, "invalid_model_transcript", state.Trace)
+			return driver.fail(ctx, task, request, state.Usage, "invalid_model_transcript", state.Trace)
 		}
 		ensureActiveTurn(task, &state)
 		turnOrdinal := state.ActiveTurn.Ordinal
@@ -115,9 +116,9 @@ func runAgentLoop(ctx context.Context, driver loopDriver, task TaskContext, requ
 				state.Trace.RuntimeStop = "model_budget_unavailable"
 				if errors.Is(err, budget.ErrExhausted) {
 					state.Trace.RuntimeStop = "model_budget_exhausted"
-					return driver.fail(ctx, task, state.Usage, "model_budget_exhausted", state.Trace)
+					return driver.fail(ctx, task, request, state.Usage, "model_budget_exhausted", state.Trace)
 				}
-				return driver.fail(ctx, task, state.Usage, "model_budget_unavailable", state.Trace)
+				return driver.fail(ctx, task, request, state.Usage, "model_budget_unavailable", state.Trace)
 			}
 		}
 		modelStarted := time.Now()
@@ -134,7 +135,7 @@ func runAgentLoop(ctx context.Context, driver loopDriver, task TaskContext, requ
 			actual := response.Usage.InputTokens + response.Usage.OutputTokens
 			if err := driver.loop.Budget.Settle(ctx, reservationID, actual, callErr == nil); err != nil {
 				state.Trace.RuntimeStop = "budget_accounting_failed"
-				return driver.fail(ctx, task, state.Usage, "budget_accounting_failed", state.Trace)
+				return driver.fail(ctx, task, request, state.Usage, "budget_accounting_failed", state.Trace)
 			}
 		}
 		state.TurnsUsed++
@@ -146,7 +147,7 @@ func runAgentLoop(ctx context.Context, driver loopDriver, task TaskContext, requ
 			finishActiveTurn(&state, &response, "succeeded")
 		}
 		driver.logger.Info("model call finished", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "invocation_id", task.InvocationID, "turn", turnOrdinal, "duration_ms", time.Since(modelStarted).Milliseconds(), "input_tokens", response.Usage.InputTokens, "output_tokens", response.Usage.OutputTokens, "cache_hit_tokens", response.Usage.CacheHitTokens, "cache_miss_tokens", response.Usage.CacheMissTokens, "error_code", observability.ErrorCode(callErr), "error", observability.SafeError(callErr))
-		canceled, cancelErr := driver.cancel(ctx, task, &state)
+		canceled, cancelErr := driver.cancel(ctx, task, request, &state)
 		if cancelErr != nil || canceled {
 			return cancelErr
 		}
@@ -155,12 +156,12 @@ func runAgentLoop(ctx context.Context, driver loopDriver, task TaskContext, requ
 				return ctx.Err()
 			}
 			state.Trace.RuntimeStop = "model_unavailable"
-			return driver.fail(ctx, task, state.Usage, "model_unavailable", state.Trace)
+			return driver.fail(ctx, task, request, state.Usage, "model_unavailable", state.Trace)
 		}
 		if driver.refresh != nil {
 			changed, err := driver.refresh(ctx, task, &request, &state)
 			if err != nil {
-				return driver.fail(ctx, task, state.Usage, "task_input_unavailable", state.Trace)
+				return driver.fail(ctx, task, request, state.Usage, "task_input_unavailable", state.Trace)
 			}
 			if changed {
 				markLatestTurnSuperseded(&state)
@@ -177,14 +178,14 @@ func runAgentLoop(ctx context.Context, driver loopDriver, task TaskContext, requ
 		if err := validateAssistantMessage(response.Message); err != nil {
 			state.Trace.ModelTurns[len(state.Trace.ModelTurns)-1].Status = "failed"
 			state.Trace.RuntimeStop = "invalid_model_response"
-			return driver.fail(ctx, task, state.Usage, "invalid_model_response", state.Trace)
+			return driver.fail(ctx, task, request, state.Usage, "invalid_model_response", state.Trace)
 		}
 		assistantIndex := len(request.Messages)
 		request.Messages = append(request.Messages, response.Message)
 		if driver.refresh != nil {
 			changed, err := driver.refresh(ctx, task, &request, &state)
 			if err != nil {
-				return driver.fail(ctx, task, state.Usage, "task_input_unavailable", state.Trace)
+				return driver.fail(ctx, task, request, state.Usage, "task_input_unavailable", state.Trace)
 			}
 			if changed {
 				removeMessageAt(&request, assistantIndex)
@@ -220,7 +221,7 @@ func runAgentLoop(ctx context.Context, driver loopDriver, task TaskContext, requ
 		}
 		if driver.tools == nil {
 			state.Trace.RuntimeStop = "tool_gateway_unavailable"
-			return driver.fail(ctx, task, state.Usage, "tool_gateway_unavailable", state.Trace)
+			return driver.fail(ctx, task, request, state.Usage, "tool_gateway_unavailable", state.Trace)
 		}
 		if response.FinishReason == "length" {
 			for _, call := range response.Message.ToolCalls {
@@ -248,11 +249,11 @@ func runAgentLoop(ctx context.Context, driver loopDriver, task TaskContext, requ
 		if driver.refresh != nil {
 			changed, err := driver.refresh(ctx, task, &request, &state)
 			if err != nil {
-				return driver.fail(ctx, task, state.Usage, "task_input_unavailable", state.Trace)
+				return driver.fail(ctx, task, request, state.Usage, "task_input_unavailable", state.Trace)
 			}
 			if changed {
 				if _, err := closeInterruptedToolFrame(&request, assistantIndex, modelToolIDs, &state); err != nil {
-					return driver.fail(ctx, task, state.Usage, "invalid_model_transcript", state.Trace)
+					return driver.fail(ctx, task, request, state.Usage, "invalid_model_transcript", state.Trace)
 				}
 				driver.logger.Info("tool turn superseded before effect dispatch", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "invocation_id", task.InvocationID, "turn", turnOrdinal, "input_sequence", state.InputSequence)
 				state.NextTurnTrigger = "user_input"
@@ -269,7 +270,7 @@ func runAgentLoop(ctx context.Context, driver loopDriver, task TaskContext, requ
 		if errors.Is(err, ErrStaleTaskInput) {
 			retained, closeErr := closeInterruptedToolFrame(&request, assistantIndex, modelToolIDs, &state)
 			if closeErr != nil {
-				return driver.fail(ctx, task, state.Usage, "invalid_model_transcript", state.Trace)
+				return driver.fail(ctx, task, request, state.Usage, "invalid_model_transcript", state.Trace)
 			}
 			driver.logger.Info("tool turn interrupted at effect fence", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "invocation_id", task.InvocationID, "turn", turnOrdinal, "input_sequence", state.InputSequence, "protocol_frame_retained", retained)
 			state.NextTurnTrigger = "user_input"
@@ -304,7 +305,7 @@ func runAgentLoop(ctx context.Context, driver loopDriver, task TaskContext, requ
 				continue
 			}
 			state.Trace.RuntimeStop = "agent_loop_no_progress"
-			return driver.fail(ctx, task, state.Usage, "agent_loop_no_progress", state.Trace)
+			return driver.fail(ctx, task, request, state.Usage, "agent_loop_no_progress", state.Trace)
 		}
 		if stagnant == 2 {
 			request.Messages = append(request.Messages, Message{Role: "system", Content: "The last native tool action and its observation repeated without new information. Reflect on the unmet success criteria and change strategy, tool, query, or scope; do not repeat the same call again."})
@@ -556,10 +557,11 @@ func (s *Service) evaluateAndCommitCandidate(
 	s.logger.Info("evaluation finished", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "invocation_id", task.InvocationID, "attempt", evaluationAttempt, "result", decision.Result, "tier", decision.Tier, "duration_ms", time.Since(evaluationStartedAt).Milliseconds(), "input_tokens", judgeUsage.InputTokens, "output_tokens", judgeUsage.OutputTokens, "cache_hit_tokens", judgeUsage.CacheHitTokens, "cache_miss_tokens", judgeUsage.CacheMissTokens, "error_code", observability.ErrorCode(judgeErr), "error", observability.SafeError(judgeErr))
 	if judgeErr != nil {
 		state.Trace.RuntimeStop = "llm_judge_unavailable"
+		trace := traceWithProviderTranscript(state.Trace, request)
 		if state.ConfirmedEffects > 0 {
-			return request, false, s.commitFailureAfterEffect(ctx, task, state.Usage, "llm_judge_unavailable", state.Trace)
+			return request, false, s.commitFailureAfterEffect(ctx, task, state.Usage, "llm_judge_unavailable", trace)
 		}
-		return request, false, s.commitFailure(ctx, task, state.Usage, "llm_judge_unavailable", state.Trace)
+		return request, false, s.commitFailure(ctx, task, state.Usage, "llm_judge_unavailable", trace)
 	}
 	changed, err = s.refreshTaskInputs(ctx, task, &request, state)
 	if err != nil {
@@ -591,7 +593,7 @@ func (s *Service) evaluateAndCommitCandidate(
 		state.Trace.ModelTurns[len(state.Trace.ModelTurns)-1].Message.Content = "[candidate withheld for repair]"
 		if state.EvalAttempts >= s.loop.MaxEvalAttempts {
 			state.Trace.RuntimeStop = "llm_judge_repair_limit"
-			return request, false, s.commitFailure(ctx, task, state.Usage, "llm_judge_repair_limit", state.Trace)
+			return request, false, s.commitFailure(ctx, task, state.Usage, "llm_judge_repair_limit", traceWithProviderTranscript(state.Trace, request))
 		}
 		if decision.Result == eval.Escalate {
 			state.NextTurnTrigger = "eval_escalation"
@@ -601,13 +603,13 @@ func (s *Service) evaluateAndCommitCandidate(
 		return evalRepairRequest(request, decision), true, nil
 	}
 	if decision.Result != eval.Pass {
-		return request, false, s.commitFailure(ctx, task, state.Usage, "task_eval_held", state.Trace)
+		return request, false, s.commitFailure(ctx, task, state.Usage, "task_eval_held", traceWithProviderTranscript(state.Trace, request))
 	}
 	state.EvalFindings = append(state.EvalFindings, decision.Findings...)
 	if state.PendingDeferred != nil {
 		return request, false, s.pauseForSubagent(ctx, task, *state, request, modelToolIDs, body, decision.Tier)
 	}
-	err = s.commitEvaluatedReply(ctx, task, state.Trace, state.Usage, body, "text", decision.Tier, state.EvalFindings, state.Attachments, state.InputSequence)
+	err = s.commitEvaluatedReply(ctx, task, traceWithProviderTranscript(state.Trace, request), state.Usage, body, "text", decision.Tier, state.EvalFindings, state.Attachments, state.InputSequence)
 	if errors.Is(err, ErrStaleTaskInput) {
 		changed, refreshErr := s.refreshTaskInputs(ctx, task, &request, state)
 		if refreshErr != nil {
@@ -780,6 +782,12 @@ func traceSafeMessage(message Message) Message {
 	return copy
 }
 
+func traceWithProviderTranscript(trace runTrace, request ModelRequest) runTrace {
+	transcript := snapshotModelRequest(request)
+	trace.ProviderTranscript = &transcript
+	return trace
+}
+
 func estimateModelTokens(request ModelRequest) int {
 	return estimateSerializedTokens(request, request.MaxOutputTokens)
 }
@@ -840,7 +848,7 @@ func (s *Service) executeCallsWithRecovery(ctx context.Context, task TaskContext
 				return false, ErrStaleTaskInput
 			}
 		}
-		canceled, err := s.cancelIfRequested(ctx, task, state)
+		canceled, err := s.cancelIfRequested(ctx, task, *request, state)
 		if err != nil || canceled {
 			return canceled, err
 		}
@@ -980,13 +988,13 @@ func contains(values []string, target string) bool {
 	return false
 }
 
-func (s *Service) cancelIfRequested(ctx context.Context, task TaskContext, state *loopState) (bool, error) {
+func (s *Service) cancelIfRequested(ctx context.Context, task TaskContext, request ModelRequest, state *loopState) (bool, error) {
 	requested, err := s.repository.TaskCancelRequested(ctx, task.TaskID)
 	if err != nil || !requested {
 		return false, err
 	}
 	state.Trace.RuntimeStop = "user_canceled"
-	traceRef, err := s.storeTrace(ctx, task.InvocationID, state.Trace)
+	traceRef, err := s.storeTrace(ctx, task.InvocationID, traceWithProviderTranscript(state.Trace, request))
 	if err != nil {
 		return false, err
 	}
