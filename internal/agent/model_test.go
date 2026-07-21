@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/z-chenhao/eri/internal/eval"
+	"github.com/z-chenhao/eri/internal/execution"
 	"github.com/z-chenhao/eri/internal/identity"
 	"github.com/z-chenhao/eri/internal/memory"
 	"github.com/z-chenhao/eri/internal/tool"
@@ -338,6 +339,25 @@ func TestRestoreJudgeContextMigratesLegacyCheckpointWithoutGenerationInstruction
 		if strings.Contains(continuation.State.JudgeContext, forbidden) {
 			t.Fatalf("restored Judge context inherited %q: %s", forbidden, continuation.State.JudgeContext)
 		}
+	}
+}
+
+func TestRestoreConversationWatermarkUsesLegacyInputAsConservativeBaseline(t *testing.T) {
+	task := TaskContext{
+		InputSequence: 9,
+		CurrentTask:   execution.TaskCapsule{TaskID: "task", SourceRole: "user"},
+	}
+	continuation := pendingContinuation{State: loopState{InputSequence: 7}}
+	restoreConversationWatermark(task, &continuation)
+	if continuation.State.ConversationSequence != 7 || continuation.State.ContextManifest.ConversationSequence != 7 {
+		t.Fatalf("legacy Conversation watermark=%+v", continuation.State)
+	}
+
+	continuation.State.ConversationSequence = 11
+	continuation.State.ContextManifest.ConversationSequence = 11
+	restoreConversationWatermark(task, &continuation)
+	if continuation.State.ConversationSequence != 11 {
+		t.Fatalf("current Conversation watermark was replaced: %+v", continuation.State)
 	}
 }
 

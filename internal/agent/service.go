@@ -730,6 +730,7 @@ func (s *Service) resumeAgentCheckpoint(ctx context.Context, task TaskContext, c
 	if err := json.Unmarshal(body, &continuation); err != nil {
 		return fmt.Errorf("decode agent checkpoint: %w", err)
 	}
+	restoreConversationWatermark(task, &continuation)
 	s.restoreJudgeContext(task, &continuation)
 	if !sameStringMap(continuation.ModelToolIDs, currentToolIDs) {
 		continuation.State.Trace.RuntimeStop = "tool_surface_changed_during_recovery"
@@ -776,6 +777,21 @@ func (s *Service) resumeAgentCheckpoint(ctx context.Context, task TaskContext, c
 	default:
 		return fmt.Errorf("unsupported recovered agent checkpoint phase %q", task.CheckpointPhase)
 	}
+}
+
+func restoreConversationWatermark(task TaskContext, continuation *pendingContinuation) {
+	if task.CurrentTask.SourceRole != "user" || continuation.State.ConversationSequence > 0 {
+		return
+	}
+	baseline := continuation.State.InputSequence
+	if baseline <= 0 {
+		baseline = task.InputSequence
+	}
+	if baseline <= 0 {
+		return
+	}
+	continuation.State.ConversationSequence = baseline
+	continuation.State.ContextManifest.ConversationSequence = baseline
 }
 
 func (s *Service) restoreJudgeContext(task TaskContext, continuation *pendingContinuation) {
