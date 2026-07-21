@@ -146,6 +146,7 @@ Fixed rules:
 - Memory details distinguish `stored`, `retrieved`, `injected`, `applied`, `sent_to_external_model`, and `written`. One state can never be inferred from another without Runtime evidence.
 - Conversation exposes only a user-safe Run projection. Raw Events, full Context Manifest, ungoverned Tool Results, complete Effect/Eval/Delivery internals, Episodes, datasets, and evolution controls remain in Observatory.
 - No UI stores or displays private Chain of Thought, full prompts, or ungoverned Tool Results.
+- When a selected model requires hidden continuation state such as `reasoning_content` for native Tool Calling, Eri keeps it encrypted with the internal model transcript and replays it only to that provider while the corresponding Message remains in Context. It never becomes a user Message, Memory, Episode, dataset, evolution input, log field, or observable Run detail.
 
 ### 4.3 Conversation behavior
 

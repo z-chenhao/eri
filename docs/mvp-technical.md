@@ -42,7 +42,7 @@ No Model, Tool, Plugin, Channel, or future implementation may bypass these rules
 9. **Failures are honest.** No Receipt means no confirmed success. Unknown outcomes reconcile before retry.
 10. **Concurrency preserves Task order.** Tasks may run concurrently; one Task's authoritative commits are version-serial.
 11. **Protected boundaries do not evolve.** Soul, user sovereignty, local-first, privacy, credential rules, Memory truth, and strong approval never enter a candidate search space.
-12. **No private reasoning retention.** Store provider-visible assistant Messages, Tool Calls/Results, governed Trace, Context Manifest, Observation, and outcome—not private Chain of Thought.
+12. **Provider continuation fidelity is governed.** Preserve provider-required continuation state such as `reasoning_content` with its assistant Message inside the encrypted model transcript and Agent checkpoints. Replay it whenever that Message remains in a later provider request, including after recovery; never promote it into Delivery, logs, Observatory, Memory, Episodes, datasets, or evolution.
 13. **Conversation is zero-settings and auditable.** It exposes answer-bound safe execution only; developer events and operations remain in Observatory.
 14. **Subagents never face the user.** Primary Eri alone delivers and owns responsibility.
 15. **Repository language is English; assistant language is contextual.** Source, tests, documentation, and UI copy are English. Runtime answers follow the user's language.
@@ -411,9 +411,9 @@ Ollama is default local. DeepSeek is optional and accessed either through enviro
 
 ### 10.5 DeepSeek cache and cost
 
-Keep the stable request prefix byte-identical: safety/Soul, static Skill catalog summaries, and Tool schemas precede volatile history. Record provider-reported `cache_hit_tokens` and `cache_miss_tokens`; cache is best-effort, never correctness state. A live two-request probe validates that a stable prefix can hit before accepting a cache-sensitive release claim. Tool-bearing Flash turns remain non-thinking so recovery never has to persist provider reasoning; Tool-free Judge, comparison, compaction, and structured synthesis calls may enable provider thinking while discarding private reasoning content.
+Keep the stable request prefix byte-identical: safety/Soul, static Skill catalog summaries, and Tool schemas precede volatile history. Record provider-reported `cache_hit_tokens` and `cache_miss_tokens`; cache is best-effort, never correctness state. A live two-request probe validates that a stable prefix can hit before accepting a cache-sensitive release claim. DeepSeek thinking remains enabled for native Tool Calls, Judge, comparison, compaction, and structured synthesis. The adapter captures each assistant `reasoning_content` field beside its Tool Calls, persists the complete transcript in the encrypted Agent checkpoint before Tool execution, and sends the field back on every later request that retains that assistant Message, including after recovery. Safe Trace and observability projections exclude it.
 
-Reflection is not a separate Runtime, service, or Workflow. Inside a Run it means a model reorients after repeated evidence or performs a bounded Tool-free structured analysis. Eri retains only the resulting provider-visible instruction, finding, or summary—not private reasoning.
+Reflection is not a separate Runtime, service, or Workflow. Inside a Run it means a model reorients after repeated evidence or performs a bounded structured analysis. Provider-required continuation state stays attached to the encrypted model transcript for exact replay; Eri exposes and promotes only the resulting instruction, finding, or summary.
 
 Model, Judge, repair, subagent, and compaction usage is attributed to its Task and recorded without prompts or keys. Eri does not deny a model dispatch through a Task/day/month token ceiling. Runtime instead relies on provider context/account limits, deadlines, governed no-progress recovery, cancellation, and explicit authority for background work; material external expense still requires strong approval.
 

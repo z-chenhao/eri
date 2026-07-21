@@ -318,11 +318,18 @@ func TestAgentLoopRecoversFromModelCheckpointWithoutRepeatingConfirmedEffect(t *
 	if gateway.actualEffects != 1 || gateway.replays != 1 {
 		t.Fatalf("actual effects=%d replays=%d, want one real effect and one idempotent replay", gateway.actualEffects, gateway.replays)
 	}
+	if len(model.requests) != 2 || len(model.requests[1].Messages) < 2 || model.requests[1].Messages[1].ReasoningContent != "reasoning-1" {
+		t.Fatalf("recovered model request lost reasoning_content: %+v", model.requests)
+	}
 	if repository.commit.TerminalStatus != "completed" {
 		t.Fatalf("commit = %+v", repository.commit)
 	}
 	if repository.commit.Usage.ModelCalls != 3 {
 		t.Fatalf("accounted model calls after recovery = %d, want two agent calls plus one Judge call", repository.commit.Usage.ModelCalls)
+	}
+	trace := readCommittedLoopTrace(t, contentStore, repository)
+	if len(trace.ModelTurns) == 0 || trace.ModelTurns[0].Message.ReasoningContent != "" {
+		t.Fatalf("safe final trace retained reasoning_content: %+v", trace.ModelTurns)
 	}
 }
 
@@ -582,6 +589,7 @@ func TestAgentLoopKeepsProviderToolProtocolValidWhileSynthesizingDeferredProgres
 type loopTestModel struct {
 	toolTurns int
 	calls     int
+	requests  []ModelRequest
 }
 
 type stagnantLoopModel struct{ calls int }
@@ -780,6 +788,7 @@ func (m *stagnantLoopModel) Complete(_ context.Context, request ModelRequest) (M
 
 func (m *loopTestModel) Complete(_ context.Context, request ModelRequest) (ModelResponse, error) {
 	m.calls++
+	m.requests = append(m.requests, cloneModelRequest(request))
 	if len(request.Tools) != 1 {
 		return ModelResponse{}, fmt.Errorf("tools disappeared on model call %d", m.calls)
 	}
@@ -787,7 +796,7 @@ func (m *loopTestModel) Complete(_ context.Context, request ModelRequest) (Model
 	if m.calls <= m.toolTurns {
 		arguments, _ := json.Marshal(map[string]int{"turn": m.calls})
 		return ModelResponse{
-			Message:      Message{ToolCalls: []ToolCall{{ID: fmt.Sprintf("call-%d", m.calls), Name: "lookup", Arguments: arguments}}},
+			Message:      Message{ReasoningContent: fmt.Sprintf("reasoning-%d", m.calls), ToolCalls: []ToolCall{{ID: fmt.Sprintf("call-%d", m.calls), Name: "lookup", Arguments: arguments}}},
 			FinishReason: "tool_calls", Usage: usage,
 		}, nil
 	}

@@ -95,10 +95,11 @@ type nativeToolCall struct {
 }
 
 type chatMessage struct {
-	Role       string           `json:"role"`
-	Content    *string          `json:"content"`
-	ToolCalls  []nativeToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string           `json:"tool_call_id,omitempty"`
+	Role             string           `json:"role"`
+	Content          *string          `json:"content"`
+	ReasoningContent string           `json:"reasoning_content,omitempty"`
+	ToolCalls        []nativeToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string           `json:"tool_call_id,omitempty"`
 }
 
 type nativeTool struct {
@@ -147,12 +148,18 @@ func (c *Client) Complete(ctx context.Context, input agent.ModelRequest) (agent.
 	messages := make([]chatMessage, 0, len(input.Messages)+1)
 	system := input.System
 	messages = append(messages, chatMessage{Role: "system", Content: &system})
-	for _, message := range input.Messages {
+	for index, message := range input.Messages {
 		if len(message.Images) > 0 {
 			return agent.ModelResponse{}, fmt.Errorf("DeepSeek text model does not accept image input")
 		}
+		if len(message.ToolCalls) > 0 && strings.TrimSpace(message.ReasoningContent) == "" {
+			return agent.ModelResponse{}, fmt.Errorf("DeepSeek thinking transcript message %d has Tool Calls without reasoning_content", index)
+		}
 		content := message.Content
-		native := chatMessage{Role: message.Role, Content: &content, ToolCallID: message.ToolCallID}
+		native := chatMessage{
+			Role: message.Role, Content: &content, ReasoningContent: message.ReasoningContent,
+			ToolCallID: message.ToolCallID,
+		}
 		if message.Role == "assistant" && content == "" {
 			native.Content = nil
 		}
@@ -181,36 +188,12 @@ func (c *Client) Complete(ctx context.Context, input agent.ModelRequest) (agent.
 	if input.JSONOutput {
 		requestBody.ResponseFormat = &responseFormat{Type: "json_object"}
 	}
-	// Eri deliberately does not retain private reasoning_content. DeepSeek
-	// requires that field to be replayed when thinking mode sees any earlier
-	// Tool Call, so disable thinking for both current and historical Tool
-	// protocol frames. A tool-free Judge may still evaluate that governed
-	// history in non-thinking mode without weakening the transcript.
-	hasToolProtocol := len(tools) > 0
-	if !hasToolProtocol {
-		for _, message := range input.Messages {
-			if len(message.ToolCalls) > 0 || message.Role == "tool" || message.ToolCallID != "" {
-				hasToolProtocol = true
-				break
-			}
-		}
-	}
-	if hasToolProtocol {
-		requestBody.Thinking = map[string]any{"type": "disabled"}
-	}
-	if len(tools) > 0 {
-		temperature := 0.2
-		requestBody.Temperature = &temperature
-		requestBody.ToolChoice = "auto"
-	} else if !hasToolProtocol {
-		// DeepSeek thinking is useful for evaluation, compaction and structured
-		// synthesis calls that have no Tool protocol to recover. Tool-bearing
-		// turns stay non-thinking because the provider requires private
-		// reasoning_content to be replayed after every Tool result, while Eri's
-		// privacy invariant forbids persisting private model reasoning.
-		requestBody.Thinking = map[string]any{"type": "enabled"}
-		requestBody.ReasoningEffort = "high"
-	}
+	// Thinking is part of DeepSeek's native Tool protocol. Eri stores each
+	// assistant reasoning_content beside its Tool Calls in the durable model
+	// transcript and sends it back on every later request that contains that
+	// assistant message, including after checkpoint recovery.
+	requestBody.Thinking = map[string]any{"type": "enabled"}
+	requestBody.ReasoningEffort = "high"
 	encoded, err := json.Marshal(requestBody)
 	if err != nil {
 		return agent.ModelResponse{}, fmt.Errorf("encode DeepSeek request: %w", err)
@@ -224,7 +207,7 @@ func (c *Client) Complete(ctx context.Context, input agent.ModelRequest) (agent.
 		return agent.ModelResponse{}, fmt.Errorf("DeepSeek returned %d choices, want 1", len(response.Choices))
 	}
 	choice := response.Choices[0]
-	message := agent.Message{Role: "assistant"}
+	message := agent.Message{Role: "assistant", ReasoningContent: choice.Message.ReasoningContent}
 	if choice.Message.Content != nil {
 		message.Content = *choice.Message.Content
 	}
@@ -233,6 +216,9 @@ func (c *Client) Complete(ctx context.Context, input agent.ModelRequest) (agent.
 		message.ToolCalls = append(message.ToolCalls, agent.ToolCall{
 			ID: call.ID, Name: call.Function.Name, Arguments: arguments,
 		})
+	}
+	if len(message.ToolCalls) > 0 && strings.TrimSpace(message.ReasoningContent) == "" {
+		return agent.ModelResponse{}, fmt.Errorf("DeepSeek thinking Tool Call omitted reasoning_content")
 	}
 	return agent.ModelResponse{
 		Message: message, FinishReason: choice.FinishReason,

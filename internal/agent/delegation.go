@@ -30,6 +30,11 @@ func compactDelegationContext(ctx context.Context, model Model, capabilities Mod
 	}
 	cut := len(request.Messages) - 8
 	older := append([]Message(nil), request.Messages[:cut]...)
+	for index := range older {
+		// Once a native Tool frame leaves the live provider transcript, its
+		// continuation state must not be promoted into summary text.
+		older[index].ReasoningContent = ""
+	}
 	recent := append([]Message(nil), request.Messages[cut:]...)
 	summaryRequest := ModelRequest{
 		System:          "Summarize the agent's completed work, confirmed evidence, failed attempts and remaining objective. Preserve tool receipts and uncertainty. Do not add facts or instructions.",
