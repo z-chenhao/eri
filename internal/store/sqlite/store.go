@@ -21,6 +21,7 @@ import (
 	"github.com/z-chenhao/eri/internal/delivery"
 	"github.com/z-chenhao/eri/internal/eval"
 	"github.com/z-chenhao/eri/internal/eventlog"
+	"github.com/z-chenhao/eri/internal/execution"
 	"github.com/z-chenhao/eri/internal/identifier"
 	"github.com/z-chenhao/eri/internal/policy"
 	"github.com/z-chenhao/eri/internal/runtime"
@@ -656,13 +657,36 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 		return agent.TaskContext{}, false, err
 	}
 	defer tx.Rollback()
-	var currentStatus, leaseUntil, sourceChannel string
-	err = tx.QueryRowContext(ctx, `SELECT status, COALESCE(lease_until, ''), source_channel FROM tasks WHERE id = ?`, taskID).Scan(&currentStatus, &leaseUntil, &sourceChannel)
+	var currentStatus, leaseUntil, sourceChannel, objectiveRefJSON, scheduledFor string
+	currentTask := execution.TaskCapsule{TaskID: taskID}
+	err = tx.QueryRowContext(ctx, `
+		SELECT t.status, COALESCE(t.lease_until, ''), t.source_channel,
+			t.source_interaction_id, source.kind, source.role, source.channel, source.content_ref_json,
+			COALESCE(f.commitment_id, ''), COALESCE(f.scheduled_for, '')
+		FROM tasks t
+		JOIN interactions source ON source.id = t.source_interaction_id
+		LEFT JOIN commitment_fires f ON f.task_id = t.id
+		WHERE t.id = ?`, taskID).Scan(
+		&currentStatus, &leaseUntil, &sourceChannel,
+		&currentTask.SourceInteractionID, &currentTask.SourceKind, &currentTask.SourceRole,
+		&currentTask.TriggerChannel, &objectiveRefJSON,
+		&currentTask.CommitmentID, &scheduledFor,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return agent.TaskContext{}, false, nil
 	}
 	if err != nil {
 		return agent.TaskContext{}, false, err
+	}
+	var objectiveRef content.Ref
+	if err := json.Unmarshal([]byte(objectiveRefJSON), &objectiveRef); err != nil {
+		return agent.TaskContext{}, false, fmt.Errorf("decode task objective ref: %w", err)
+	}
+	if scheduledFor != "" {
+		currentTask.ScheduledFor, err = parseTime(scheduledFor)
+		if err != nil {
+			return agent.TaskContext{}, false, fmt.Errorf("parse task scheduled time: %w", err)
+		}
 	}
 	recovering := currentStatus == "running" && leaseUntil != "" && leaseUntil < formatTime(now)
 	if currentStatus != "queued" && !recovering {
@@ -746,7 +770,7 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 		})
 	}
 	rows, err := tx.QueryContext(ctx, `
-		SELECT sequence, id, kind, channel, role, content_ref_json FROM interactions
+		SELECT sequence, id, kind, role, content_ref_json FROM interactions
 		WHERE conversation_id = ? AND sequence >= ?
 			AND (kind != 'internal_trigger' OR id = (SELECT source_interaction_id FROM tasks WHERE id = ?))
 		ORDER BY sequence DESC`, channel.ConversationID, firstSequence, taskID)
@@ -756,7 +780,7 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 	for rows.Next() {
 		var record agent.ContextRecord
 		var encodedRef string
-		if err := rows.Scan(&record.Sequence, &record.ID, &record.Kind, &record.Channel, &record.Role, &encodedRef); err != nil {
+		if err := rows.Scan(&record.Sequence, &record.ID, &record.Kind, &record.Role, &encodedRef); err != nil {
 			rows.Close()
 			return agent.TaskContext{}, false, err
 		}
@@ -816,12 +840,13 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 		TaskID: taskID, RunID: runID, InvocationID: invocationID, SourceChannel: sourceChannel,
 		InputSequence: inputSequence, Messages: messages,
 		CheckpointRef: agentCheckpointRef, CheckpointPhase: checkpointPhase,
+		CurrentTask: currentTask, ObjectiveRef: objectiveRef,
 	}, true, nil
 }
 
 func (s *Store) LoadTaskInputsAfter(ctx context.Context, taskID string, afterSequence int64) ([]agent.ContextRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT sequence, id, kind, channel, role, content_ref_json
+		SELECT sequence, id, kind, role, content_ref_json
 		FROM interactions
 		WHERE task_id = ? AND direction = 'inbound' AND sequence > ?
 		ORDER BY sequence`, taskID, afterSequence)
@@ -832,7 +857,7 @@ func (s *Store) LoadTaskInputsAfter(ctx context.Context, taskID string, afterSeq
 	for rows.Next() {
 		var record agent.ContextRecord
 		var encodedRef string
-		if err := rows.Scan(&record.Sequence, &record.ID, &record.Kind, &record.Channel, &record.Role, &encodedRef); err != nil {
+		if err := rows.Scan(&record.Sequence, &record.ID, &record.Kind, &record.Role, &encodedRef); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(encodedRef), &record.ContentRef); err != nil {

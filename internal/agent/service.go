@@ -26,7 +26,6 @@ import (
 type ContextRecord struct {
 	ID          string
 	Kind        string
-	Channel     string
 	Sequence    int64
 	Role        string
 	ContentRef  content.Ref
@@ -50,6 +49,8 @@ type TaskContext struct {
 	Messages        []ContextRecord
 	CheckpointRef   content.Ref
 	CheckpointPhase string
+	CurrentTask     execution.TaskCapsule
+	ObjectiveRef    content.Ref
 }
 
 type ContextCheckpoint struct {
@@ -545,6 +546,10 @@ func (s *Service) ProcessTask(ctx context.Context, taskID string) error {
 	manifestValue.SourceChannel = task.SourceChannel
 	manifestValue.RuntimeObservedAt = observedAt.UTC()
 	manifestValue.RuntimeTimezone = observedAt.Location().String()
+	if task.CurrentTask.TaskID != "" {
+		currentTask := task.CurrentTask
+		manifestValue.CurrentTask = &currentTask
+	}
 	s.logger.Info("invocation claimed", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "invocation_id", task.InvocationID)
 	if task.CheckpointRef.ObjectID != "" {
 		if err := s.repository.MarkInvocationDispatched(ctx, task.InvocationID); err != nil {
@@ -561,6 +566,17 @@ func (s *Service) ProcessTask(ctx context.Context, taskID string) error {
 		return s.commitFailure(ctx, task, Usage{}, "context_unavailable")
 	}
 	taskText := latestTaskContent(messages)
+	objective := ""
+	if task.ObjectiveRef.ObjectID != "" {
+		body, err := s.content.Get(ctx, task.ObjectiveRef)
+		if err != nil {
+			return s.commitFailure(ctx, task, Usage{}, "task_objective_unavailable")
+		}
+		objective = string(body)
+		if strings.TrimSpace(taskText) == "" {
+			taskText = objective
+		}
+	}
 	if err := s.repository.MarkInvocationDispatched(ctx, task.InvocationID); err != nil {
 		return err
 	}
@@ -613,7 +629,7 @@ func (s *Service) ProcessTask(ctx context.Context, taskID string) error {
 			MessageIDs: contextRecordIDs(task.Messages, "context_checkpoint"),
 			MemoryIDs:  append([]string(nil), manifestValue.MemoryIDs...),
 			SkillIDs:   append([]string(nil), manifestValue.SkillIDs...),
-			Categories: []string{"conversation", "task_context", "selected_memory", "activated_skills", "tool_schemas"},
+			Categories: []string{"conversation", "current_task", "selected_memory", "activated_skills", "tool_schemas"},
 		}
 	}
 	prompts := assembleRunPrompts(s.identity, skillContext, evolutionInstruction.Text, memoryBundle, task.SourceChannel, observedAt)
@@ -628,8 +644,10 @@ func (s *Service) ProcessTask(ctx context.Context, taskID string) error {
 		return s.commitFailure(ctx, task, compactionUsage, "context_compaction_failed")
 	}
 	for _, document := range explicitSkills {
-		request.Messages = append(request.Messages, Message{Role: "system", Content: "The user explicitly activated this Agent Skill:\n" + skill.Render(document)})
+		request.Messages = append(request.Messages, Message{Role: "system", Content: "<activated_skill>\nThe user explicitly activated this Agent Skill:\n" + skill.Render(document) + "\n</activated_skill>"})
 	}
+	request.Messages = append(request.Messages, prompts.DynamicContext...)
+	request.Messages = append(request.Messages, currentTaskMessages(task.CurrentTask, objective, task.InputSequence)...)
 	manifestValue.EstimatedInputTokens = estimateModelInputTokens(request)
 	updatedManifest, err := json.Marshal(manifestValue)
 	if err != nil {

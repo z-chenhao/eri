@@ -185,9 +185,6 @@ func (s *Service) deliveryTarget(ctx context.Context, sourceTaskID, deliveryRout
 
 func (s *Service) storePrompt(ctx context.Context, id string, request CreateRequest) (content.Ref, error) {
 	prompt := "A durable commitment is due. Deliver this reminder or recurring task in the canonical conversation: " + request.Message
-	if request.Schedule.Type != "once" {
-		prompt += " Treat this Runtime trigger, not an unrelated earlier conversation message, as the current objective. Report only claims supported by this run."
-	}
 	if request.Importance == "important" {
 		prompt += " Call the local notification tool once so the user can find this time-sensitive message even when the web page is closed."
 	}

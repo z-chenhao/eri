@@ -45,6 +45,19 @@ type RuntimeCompaction struct {
 	SummarizedMessages int `json:"summarized_messages"`
 }
 
+// TaskCapsule identifies the durable Runtime task represented in one model
+// invocation. The objective body remains in the governed Content Store; this
+// manifest records only safe provenance and scheduling facts.
+type TaskCapsule struct {
+	TaskID              string    `json:"task_id"`
+	SourceInteractionID string    `json:"source_interaction_id"`
+	SourceKind          string    `json:"source_kind"`
+	SourceRole          string    `json:"source_role"`
+	TriggerChannel      string    `json:"trigger_channel"`
+	CommitmentID        string    `json:"commitment_id,omitempty"`
+	ScheduledFor        time.Time `json:"scheduled_for,omitempty"`
+}
+
 // ContextManifest is the durable declaration of context assembled for one
 // invocation. IDs are stored instead of secret or private payload bodies.
 type ContextManifest struct {
@@ -75,4 +88,5 @@ type ContextManifest struct {
 	Compression             Compression         `json:"compression"`
 	RuntimeCompactions      []RuntimeCompaction `json:"runtime_compactions,omitempty"`
 	ExternalMemoryIDs       []string            `json:"external_memory_ids,omitempty"`
+	CurrentTask             *TaskCapsule        `json:"current_task,omitempty"`
 }

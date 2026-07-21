@@ -59,6 +59,19 @@ func TestCommitmentFirePreservesCreatingLarkTarget(t *testing.T) {
 	if sourceChannel != "lark" || fireChannel != "lark" || conversationID != "oc_owner_chat" || replyToMessageID != "om_create_reminder" || routingMode != scheduler.DeliveryRouteOrigin {
 		t.Fatalf("fire route source=%q target=%q conversation=%q reply=%q mode=%q", sourceChannel, fireChannel, conversationID, replyToMessageID, routingMode)
 	}
+	claimedTask, claimed, err := store.ClaimTask(ctx, fireTaskID, "test-worker", time.Minute, "soul", `{}`, "test:model")
+	if err != nil || !claimed {
+		t.Fatalf("claim scheduled task claimed=%t err=%v", claimed, err)
+	}
+	if claimedTask.CurrentTask.TaskID != fireTaskID || claimedTask.CurrentTask.CommitmentID != commitment.ID ||
+		claimedTask.CurrentTask.SourceKind != "internal_trigger" || claimedTask.CurrentTask.SourceRole != "system" ||
+		claimedTask.CurrentTask.TriggerChannel != "scheduler" || !claimedTask.CurrentTask.ScheduledFor.Equal(commitment.NextRunAt) {
+		t.Fatalf("scheduled task capsule = %+v", claimedTask.CurrentTask)
+	}
+	objective, err := contentStore.Get(ctx, claimedTask.ObjectiveRef)
+	if err != nil || !bytes.Contains(objective, []byte("Go to the bathroom")) {
+		t.Fatalf("scheduled task objective=%q err=%v", objective, err)
+	}
 	now := formatTime(time.Now().UTC())
 	for _, statement := range []string{
 		`INSERT INTO runs(id, task_id, status, soul_version, started_at) VALUES('fire-run', '` + fireTaskID + `', 'active', 'soul', '` + now + `')`,
@@ -166,7 +179,7 @@ func TestCommitmentUpdateReplacesScheduleWithoutOverlap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(prompt, []byte("corrected scope")) || !bytes.Contains(prompt, []byte("Runtime trigger")) {
+	if !bytes.Contains(prompt, []byte("corrected scope")) || bytes.Contains(prompt, []byte("unrelated earlier conversation")) {
 		t.Fatalf("updated prompt = %q", prompt)
 	}
 }
