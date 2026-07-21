@@ -149,6 +149,19 @@ func TestSystemPromptRequiresOneMinimalClarification(t *testing.T) {
 	}
 }
 
+func TestSystemPromptStatesGovernedLearningWithoutCapabilityCases(t *testing.T) {
+	prompt := systemPrompt(identity.Snapshot{Soul: "stable soul"})
+	for _, required := range []string{
+		"governed Memory, linked user Feedback, Episodes, Eval, and guarded runtime-instruction experiments",
+		"cannot rewrite Soul, authority, code, or model weights",
+		"Never claim that evidence or Memory was stored, used, or learned from without its confirmed Tool observation",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("system prompt is missing governed learning rule %q", required)
+		}
+	}
+}
+
 func TestSystemPromptKeepsCapabilitySpecificRulesOutOfTheKernel(t *testing.T) {
 	prompt := systemPrompt(identity.Default())
 	if strings.Contains(prompt, "builtin.") {

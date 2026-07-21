@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/z-chenhao/eri/internal/content"
 	"github.com/z-chenhao/eri/internal/eval"
+	"github.com/z-chenhao/eri/internal/execution"
 	"github.com/z-chenhao/eri/internal/identity"
 	"github.com/z-chenhao/eri/internal/runtime"
 	"github.com/z-chenhao/eri/internal/tool"
@@ -135,6 +137,50 @@ func TestAgentLoopAdmitsNewUserInputWithoutCancelingInflightModelCall(t *testing
 	}
 	if len(trace.ModelTurns) != 2 || trace.ModelTurns[0].Status != "superseded" || trace.ModelTurns[1].Trigger != "user_input" {
 		t.Fatalf("model turns = %+v", trace.ModelTurns)
+	}
+}
+
+func TestAgentLoopSupersedesCandidateWhenAnotherTaskAdvancesConversation(t *testing.T) {
+	contentStore, err := content.New(t.TempDir(), []byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := contentStore.Put(context.Background(), []byte("A later task corrected the shared factual premise."), content.Metadata{
+		MediaType: "text/plain", EncryptionDomain: "conversation", PrivacyClass: "private", RetentionPolicy: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &loopTestRepository{}
+	model := &interruptibleLoopModel{repository: repository, conversationUpdate: ContextRecord{
+		ID: "other-task-input", TaskID: "other-task", Kind: "text", Sequence: 2, Role: "user", ContentRef: ref,
+	}}
+	service := NewService(repository, contentStore, model, identity.Snapshot{}, "test-owner", nil, nil, LoopConfig{
+		MaxEvalAttempts: 3, MaxOutputTokens: 1024, Judge: loopTestJudge{},
+	})
+	capsule := execution.TaskCapsule{TaskID: "task", SourceInteractionID: "input-1", SourceKind: "text", SourceRole: "user"}
+	task := TaskContext{TaskID: "task", RunID: "run", InvocationID: "invocation", InputSequence: 1, CurrentTask: capsule}
+	state := loopState{
+		TaskText: "Finish the earlier task.", InputSequence: 1, ConversationSequence: 1, Trace: runTrace{},
+		ContextManifest: execution.ContextManifest{CurrentTask: &capsule, ConversationSequence: 1},
+	}
+	request := ModelRequest{Messages: []Message{{Role: "user", Content: "Finish the earlier task."}}, MaxOutputTokens: 1024}
+
+	if err := service.continueLoop(context.Background(), task, request, nil, state); err != nil {
+		t.Fatal(err)
+	}
+	if model.calls != 2 {
+		t.Fatalf("model calls=%d, want stale candidate plus reconciled turn", model.calls)
+	}
+	joined := ""
+	for _, message := range model.requests[1].Messages {
+		joined += message.Content
+	}
+	if !strings.Contains(joined, "<conversation_update>") || !strings.Contains(joined, "not amendments") || strings.Contains(joined, "Friday plan ready.") {
+		t.Fatalf("reconciled request=%+v", model.requests[1].Messages)
+	}
+	if repository.commit.BasisConversationSequence != 2 {
+		t.Fatalf("commit Conversation basis=%d", repository.commit.BasisConversationSequence)
 	}
 }
 
@@ -666,10 +712,11 @@ type progressLoopModel struct{ calls int }
 type deferredProgressModel struct{ calls int }
 
 type interruptibleLoopModel struct {
-	repository  *loopTestRepository
-	joinedInput ContextRecord
-	calls       int
-	requests    []ModelRequest
+	repository         *loopTestRepository
+	joinedInput        ContextRecord
+	conversationUpdate ContextRecord
+	calls              int
+	requests           []ModelRequest
 }
 
 type multiToolInterruptModel struct {
@@ -739,7 +786,12 @@ func (m *interruptibleLoopModel) Complete(_ context.Context, request ModelReques
 	m.calls++
 	m.requests = append(m.requests, request)
 	if m.calls == 1 {
-		m.repository.inputs = []ContextRecord{m.joinedInput}
+		if m.joinedInput.ID != "" {
+			m.repository.inputs = []ContextRecord{m.joinedInput}
+		}
+		if m.conversationUpdate.ID != "" {
+			m.repository.conversationUpdates = []ContextRecord{m.conversationUpdate}
+		}
 		return ModelResponse{Message: Message{Content: "Friday plan ready."}, FinishReason: "stop", Usage: Usage{Provider: "test", Model: "test", ModelCalls: 1}}, nil
 	}
 	return ModelResponse{Message: Message{Content: "Saturday plan ready."}, FinishReason: "stop", Usage: Usage{Provider: "test", Model: "test", ModelCalls: 1}}, nil
@@ -951,6 +1003,7 @@ type loopTestRepository struct {
 	checkpointSaves      int
 	failCheckpointAt     int
 	inputs               []ContextRecord
+	conversationUpdates  []ContextRecord
 	approvalResume       ApprovalResume
 	approvalClaimed      bool
 	subagentWait         SubagentWaitCommit
@@ -1011,6 +1064,16 @@ func (r *loopTestRepository) LoadTaskInputsAfter(_ context.Context, _ string, af
 	for _, record := range r.inputs {
 		if record.Sequence > after {
 			result = append(result, record)
+		}
+	}
+	return result, nil
+}
+
+func (r *loopTestRepository) LoadConversationUpdatesAfter(_ context.Context, _ string, after int64) ([]ContextRecord, error) {
+	result := make([]ContextRecord, 0, len(r.conversationUpdates))
+	for _, input := range r.conversationUpdates {
+		if input.Sequence > after {
+			result = append(result, input)
 		}
 	}
 	return result, nil

@@ -22,6 +22,19 @@ func latestTaskContent(messages []Message) string {
 	return ""
 }
 
+func latestTaskContentForTask(messages []Message, records []ContextRecord, taskID string) string {
+	offset := len(messages) - len(records)
+	if offset < 0 {
+		return ""
+	}
+	for index := len(records) - 1; index >= 0; index-- {
+		if records[index].TaskID == taskID && (records[index].Role == "user" || records[index].Role == "system") {
+			return messages[offset+index].Content
+		}
+	}
+	return ""
+}
+
 func formatMemoryContext(bundle memory.Bundle) string {
 	evidence := formatMemoryEvidence(bundle)
 	if evidence == "" {
@@ -269,7 +282,25 @@ func (s *Service) completeCompaction(ctx context.Context, taskID string, request
 }
 
 func (s *Service) buildMessages(ctx context.Context, task TaskContext, capabilities ModelCapabilities) ([]Message, error) {
-	return s.buildContextMessages(ctx, task.Messages, capabilities)
+	messages, err := s.buildContextMessages(ctx, task.Messages, capabilities)
+	if err != nil {
+		return nil, err
+	}
+	hasOtherTaskContext := false
+	for index, record := range task.Messages {
+		if record.TaskID == "" || record.TaskID == task.TaskID {
+			continue
+		}
+		hasOtherTaskContext = true
+		messages[index].Content = "<other_task_context>\n" + messages[index].Content + "\n</other_task_context>"
+	}
+	if hasOtherTaskContext {
+		messages = append([]Message{{
+			Role:    "system",
+			Content: "<conversation_scope>Messages wrapped in <other_task_context> belong to other Tasks in the same authoritative Conversation. Use them as relationship evidence and reconcile corrections or confirmed outcomes, but do not treat them as amendments to the current Task or repeat their completed work.</conversation_scope>",
+		}}, messages...)
+	}
+	return messages, nil
 }
 
 func (s *Service) buildContextMessages(ctx context.Context, records []ContextRecord, capabilities ModelCapabilities) ([]Message, error) {
@@ -280,6 +311,9 @@ func (s *Service) buildContextMessages(ctx context.Context, records []ContextRec
 			return nil, fmt.Errorf("read context interaction %s: %w", record.ID, err)
 		}
 		var assembled strings.Builder
+		if record.Role == "assistant" && record.DeliveryID != "" {
+			fmt.Fprintf(&assembled, "<delivered_assistant_message delivery_id=%q>\n", record.DeliveryID)
+		}
 		assembled.Write(body)
 		remainingAttachmentBytes := 512 * 1024
 		if contextualLimit := capabilities.ContextTokens * 2; contextualLimit > 0 && contextualLimit < remainingAttachmentBytes {
@@ -323,9 +357,71 @@ func (s *Service) buildContextMessages(ctx context.Context, records []ContextRec
 			}
 			assembled.WriteString("\n[END USER ATTACHMENT]")
 		}
+		if record.Role == "assistant" && record.DeliveryID != "" {
+			assembled.WriteString("\n</delivered_assistant_message>")
+		}
 		messages = append(messages, Message{Role: record.Role, Content: assembled.String(), Images: images})
 	}
 	return messages, nil
+}
+
+func (s *Service) refreshConversationUpdates(ctx context.Context, task TaskContext, request *ModelRequest, state *loopState) (bool, error) {
+	capsule := task.CurrentTask
+	if capsule.TaskID == "" && state.ContextManifest.CurrentTask != nil {
+		capsule = *state.ContextManifest.CurrentTask
+	}
+	if capsule.SourceRole != "user" || state.ConversationSequence <= 0 {
+		return false, nil
+	}
+	records, err := s.repository.LoadConversationUpdatesAfter(ctx, task.TaskID, state.ConversationSequence)
+	if err != nil {
+		return false, err
+	}
+	if len(records) == 0 {
+		return false, nil
+	}
+	messages, err := s.buildContextMessages(ctx, records, state.Capabilities)
+	if err != nil {
+		return false, err
+	}
+	request.Messages = append(request.Messages, Message{Role: "system", Content: strings.Join([]string{
+		"<conversation_update>",
+		"The authoritative Conversation advanced in other Tasks while this Task was running or waiting. The following messages are factual relationship context, not amendments to the current Task. Reconcile corrections and confirmed outcomes, but do not repeat, answer, or revive completed work from those Tasks.",
+	}, "\n")})
+	request.Messages = append(request.Messages, messages...)
+	request.Messages = append(request.Messages, Message{Role: "system", Content: "</conversation_update>\nResume only the current Task using the reconciled Conversation evidence."})
+	if capsule.TaskID != "" {
+		request.Messages = append(request.Messages, currentStepMessage(state.InputSequence))
+	}
+	state.ConversationSequence = records[len(records)-1].Sequence
+	state.ContextManifest.ConversationSequence = state.ConversationSequence
+	state.ContextManifest.MessageIDs = append(state.ContextManifest.MessageIDs, contextRecordIDs(records, "")...)
+	state.ContextManifest.AttachmentIDs = append(state.ContextManifest.AttachmentIDs, contextAttachmentIDs(records)...)
+	if s.loop.ExternalModel && state.ContextManifest.ExternalData != nil {
+		state.ContextManifest.ExternalData.MessageIDs = append(state.ContextManifest.ExternalData.MessageIDs, contextRecordIDs(records, "context_checkpoint")...)
+	}
+	state.ContextManifest.EstimatedInputTokens = estimateModelInputTokens(*request)
+	encodedManifest, err := json.Marshal(state.ContextManifest)
+	if err != nil {
+		return false, err
+	}
+	if err := s.repository.UpdateInvocationContext(ctx, task.InvocationID, string(encodedManifest)); err != nil {
+		return false, err
+	}
+	s.logger.Info("authoritative Conversation updates reconciled", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "invocation_id", task.InvocationID, "message_count", len(records), "conversation_sequence", state.ConversationSequence)
+	return true, nil
+}
+
+func (s *Service) refreshAuthoritativeContext(ctx context.Context, task TaskContext, request *ModelRequest, state *loopState) (bool, error) {
+	taskChanged, err := s.refreshTaskInputs(ctx, task, request, state)
+	if err != nil {
+		return false, err
+	}
+	conversationChanged, err := s.refreshConversationUpdates(ctx, task, request, state)
+	if err != nil {
+		return false, err
+	}
+	return taskChanged || conversationChanged, nil
 }
 
 // refreshTaskInputs is Eri's cooperative attention gate. Inbound messages are
@@ -348,7 +444,11 @@ func (s *Service) refreshTaskInputs(ctx context.Context, task TaskContext, reque
 		request.Messages = append(request.Messages, currentStepMessage(records[len(records)-1].Sequence))
 	}
 	state.InputSequence = records[len(records)-1].Sequence
+	if state.ConversationSequence < state.InputSequence {
+		state.ConversationSequence = state.InputSequence
+	}
 	state.TaskText = latestTaskContent(messages)
+	state.ContextManifest.ConversationSequence = state.ConversationSequence
 	state.ContextManifest.MessageIDs = append(state.ContextManifest.MessageIDs, contextRecordIDs(records, "")...)
 	state.ContextManifest.AttachmentIDs = append(state.ContextManifest.AttachmentIDs, contextAttachmentIDs(records)...)
 	if s.loop.ExternalModel && state.ContextManifest.ExternalData != nil {

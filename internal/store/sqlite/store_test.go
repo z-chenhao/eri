@@ -139,6 +139,113 @@ func TestInboundJoinsDispatchedAgentLoopAndFencesStaleEffects(t *testing.T) {
 	}
 }
 
+func TestResumedOlderTaskCannotCaptureNewConversationBranch(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "eri.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	first, err := store.CreateInbound(ctx, "web", testRef("older-input", "older-input-hash"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	older, claimed, err := store.ClaimTask(ctx, first.TaskID, "worker", time.Minute, "soul", `{}`, "test:model")
+	if err != nil || !claimed {
+		t.Fatalf("older task=%+v claimed=%t err=%v", older, claimed, err)
+	}
+	if err := store.MarkInvocationDispatched(ctx, older.InvocationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE tasks SET status = 'waiting' WHERE id = ?`, first.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	newer, err := store.CreateInbound(ctx, "web", testRef("newer-input", "newer-input-hash"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newer.TaskID == first.TaskID {
+		t.Fatal("newer branch joined a waiting task")
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE tasks SET status = 'running' WHERE id = ?`, first.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	latest, err := store.CreateInbound(ctx, "web", testRef("latest-input", "latest-input-hash"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.TaskID == first.TaskID {
+		t.Fatalf("latest input joined resumed older task %q", first.TaskID)
+	}
+	if latest.TaskID == newer.TaskID {
+		t.Fatalf("latest input joined non-dispatched newer task %q", newer.TaskID)
+	}
+	stale := agent.Commit{
+		TaskID: first.TaskID, RunID: older.RunID, InvocationID: older.InvocationID,
+		ArtifactID: "older-artifact", EvalID: "older-eval", DeliveryID: "older-delivery",
+		ArtifactKind: "text", ArtifactRef: testRef("older-artifact-ref", "older-artifact-hash"),
+		TraceRef: testRef("older-trace", "older-trace-hash"), EvalFindingsRef: testRef("older-findings", "older-findings-hash"),
+		EvalResult: eval.Pass, TerminalStatus: "completed", BasisInputSequence: older.InputSequence,
+		BasisConversationSequence: older.ConversationSequence,
+	}
+	if err := store.CommitArtifact(ctx, stale); !errors.Is(err, agent.ErrStaleConversationContext) {
+		t.Fatalf("older Conversation artifact commit error=%v", err)
+	}
+	staleIntent := tool.Intent{
+		ID: "older-intent", TaskID: first.TaskID, RunID: older.RunID, InvocationID: older.InvocationID,
+		ToolCallID: "call-older", BasisInputSequence: older.InputSequence,
+		BasisConversationSequence: older.ConversationSequence, ToolID: "builtin.test", ToolVersion: "1",
+		Effect: policy.ReadOnly, Target: "local", ParametersHash: "hash", IdempotencyKey: "older-intent-key",
+		Status: tool.IntentPlanned, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if _, _, err := store.PlanIntent(ctx, staleIntent); !errors.Is(err, tool.ErrStaleConversationContext) {
+		t.Fatalf("older Conversation tool intent error=%v", err)
+	}
+}
+
+func TestExplicitReplyTargetsRunningTaskBeforeConversationFrontier(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "eri.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	first, _, err := store.CreateExternalInbound(ctx, "lark", channel.ExternalInteraction{
+		MessageID: "message-old", ConversationID: "owner-chat", SenderID: "owner", CreatedAt: time.Now(),
+	}, testRef("reply-old", "reply-old-hash"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	older, claimed, err := store.ClaimTask(ctx, first.TaskID, "worker", time.Minute, "soul", `{}`, "test:model")
+	if err != nil || !claimed {
+		t.Fatalf("older task=%+v claimed=%t err=%v", older, claimed, err)
+	}
+	if err := store.MarkInvocationDispatched(ctx, older.InvocationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE tasks SET status = 'waiting' WHERE id = ?`, first.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.CreateExternalInbound(ctx, "lark", channel.ExternalInteraction{
+		MessageID: "message-newer", ConversationID: "owner-chat", SenderID: "owner", CreatedAt: time.Now(),
+	}, testRef("reply-newer", "reply-newer-hash"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE tasks SET status = 'running' WHERE id = ?`, first.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	reply, _, err := store.CreateExternalInbound(ctx, "lark", channel.ExternalInteraction{
+		MessageID: "message-reply", ConversationID: "owner-chat", SenderID: "owner",
+		ReplyToMessageID: "message-old", CreatedAt: time.Now(),
+	}, testRef("reply-target", "reply-target-hash"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.TaskID != first.TaskID {
+		t.Fatalf("explicit reply task=%q, want %q", reply.TaskID, first.TaskID)
+	}
+}
+
 func TestPlanIntentReplaysDurableEffectAfterNewerInputButRejectsNewStaleEffect(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(filepath.Join(t.TempDir(), "eri.db"))

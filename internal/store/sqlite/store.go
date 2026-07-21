@@ -294,17 +294,40 @@ func (s *Store) createInbound(ctx context.Context, sourceChannel string, externa
 	}
 	joinedActiveTask := false
 	var activeTaskID string
-	err = tx.QueryRowContext(ctx, `
-		SELECT t.id
-		FROM tasks t
-		WHERE t.conversation_id = ? AND t.cancel_requested = 0 AND (
-			t.status = 'running' AND EXISTS (
+	if external.ReplyToMessageID != "" {
+		err = tx.QueryRowContext(ctx, `
+			SELECT t.id
+			FROM channel_messages replied
+			JOIN interactions replied_interaction ON replied_interaction.id = replied.interaction_id
+			JOIN tasks t ON t.id = replied_interaction.task_id
+			WHERE replied.channel = ? AND replied.external_message_id = ?
+				AND t.conversation_id = ? AND t.cancel_requested = 0 AND t.status = 'running'
+				AND EXISTS (
 					SELECT 1 FROM invocations i
 					WHERE i.task_id = t.id AND i.kind = 'model' AND i.status = 'dispatched'
 				)
-		)
-		ORDER BY t.updated_at DESC, t.created_at DESC
-		LIMIT 1`, channel.ConversationID).Scan(&activeTaskID)
+			LIMIT 1`, sourceChannel, external.ReplyToMessageID, channel.ConversationID).Scan(&activeTaskID)
+	}
+	if external.ReplyToMessageID == "" {
+		err = tx.QueryRowContext(ctx, `
+			SELECT t.id
+			FROM tasks t
+			WHERE t.conversation_id = ? AND t.cancel_requested = 0 AND t.status = 'running'
+				AND EXISTS (
+					SELECT 1 FROM invocations i
+					WHERE i.task_id = t.id AND i.kind = 'model' AND i.status = 'dispatched'
+				)
+				AND COALESCE((
+					SELECT MAX(own.sequence) FROM interactions own
+					WHERE own.task_id = t.id AND own.direction = 'inbound' AND own.role = 'user'
+				), 0) = COALESCE((
+					SELECT MAX(frontier.sequence) FROM interactions frontier
+					WHERE frontier.conversation_id = t.conversation_id
+						AND frontier.direction = 'inbound' AND frontier.role = 'user'
+				), 0)
+			ORDER BY t.updated_at DESC, t.created_at DESC
+			LIMIT 1`, channel.ConversationID).Scan(&activeTaskID)
+	}
 	if err == nil {
 		taskID = activeTaskID
 		joinedActiveTask = true
@@ -657,17 +680,17 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 		return agent.TaskContext{}, false, err
 	}
 	defer tx.Rollback()
-	var currentStatus, leaseUntil, sourceChannel, objectiveRefJSON, scheduledFor string
+	var currentStatus, leaseUntil, sourceChannel, conversationID, objectiveRefJSON, scheduledFor string
 	currentTask := execution.TaskCapsule{TaskID: taskID}
 	err = tx.QueryRowContext(ctx, `
-		SELECT t.status, COALESCE(t.lease_until, ''), t.source_channel,
+		SELECT t.status, COALESCE(t.lease_until, ''), t.source_channel, t.conversation_id,
 			t.source_interaction_id, source.kind, source.role, source.channel, source.content_ref_json,
 			COALESCE(f.commitment_id, ''), COALESCE(f.scheduled_for, '')
 		FROM tasks t
 		JOIN interactions source ON source.id = t.source_interaction_id
 		LEFT JOIN commitment_fires f ON f.task_id = t.id
 		WHERE t.id = ?`, taskID).Scan(
-		&currentStatus, &leaseUntil, &sourceChannel,
+		&currentStatus, &leaseUntil, &sourceChannel, &conversationID,
 		&currentTask.SourceInteractionID, &currentTask.SourceKind, &currentTask.SourceRole,
 		&currentTask.TriggerChannel, &objectiveRefJSON,
 		&currentTask.CommitmentID, &scheduledFor,
@@ -777,14 +800,14 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 		}
 	}
 	messageQuery := `
-		SELECT sequence, id, kind, role, content_ref_json FROM interactions
+		SELECT sequence, id, task_id, COALESCE(delivery_id, ''), kind, role, content_ref_json FROM interactions
 		WHERE conversation_id = ? AND sequence >= ?
 			AND (kind != 'internal_trigger' OR id = (SELECT source_interaction_id FROM tasks WHERE id = ?))
 		ORDER BY sequence DESC`
 	messageArgs := []any{channel.ConversationID, firstSequence, taskID}
 	if currentTask.ExecutionPhase == execution.TaskPhaseFulfillment {
 		messageQuery = `
-			SELECT sequence, id, kind, role, content_ref_json FROM interactions
+			SELECT sequence, id, task_id, COALESCE(delivery_id, ''), kind, role, content_ref_json FROM interactions
 			WHERE conversation_id = ? AND id = ? ORDER BY sequence DESC`
 		messageArgs = []any{channel.ConversationID, currentTask.SourceInteractionID}
 	}
@@ -795,7 +818,7 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 	for rows.Next() {
 		var record agent.ContextRecord
 		var encodedRef string
-		if err := rows.Scan(&record.Sequence, &record.ID, &record.Kind, &record.Role, &encodedRef); err != nil {
+		if err := rows.Scan(&record.Sequence, &record.ID, &record.TaskID, &record.DeliveryID, &record.Kind, &record.Role, &encodedRef); err != nil {
 			rows.Close()
 			return agent.TaskContext{}, false, err
 		}
@@ -848,12 +871,18 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 		WHERE task_id = ? AND direction = 'inbound'`, taskID).Scan(&inputSequence); err != nil {
 		return agent.TaskContext{}, false, err
 	}
+	var conversationSequence int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(sequence), 0) FROM interactions
+		WHERE conversation_id = ? AND kind != 'internal_trigger'`, conversationID).Scan(&conversationSequence); err != nil {
+		return agent.TaskContext{}, false, err
+	}
 	if err := tx.Commit(); err != nil {
 		return agent.TaskContext{}, false, err
 	}
 	return agent.TaskContext{
 		TaskID: taskID, RunID: runID, InvocationID: invocationID, SourceChannel: sourceChannel,
-		InputSequence: inputSequence, Messages: messages,
+		InputSequence: inputSequence, ConversationSequence: conversationSequence, Messages: messages,
 		CheckpointRef: agentCheckpointRef, CheckpointPhase: checkpointPhase,
 		CurrentTask: currentTask, ObjectiveRef: objectiveRef,
 	}, true, nil
@@ -861,7 +890,7 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 
 func (s *Store) LoadTaskInputsAfter(ctx context.Context, taskID string, afterSequence int64) ([]agent.ContextRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT sequence, id, kind, role, content_ref_json
+		SELECT sequence, id, task_id, COALESCE(delivery_id, ''), kind, role, content_ref_json
 		FROM interactions
 		WHERE task_id = ? AND direction = 'inbound' AND sequence > ?
 		ORDER BY sequence`, taskID, afterSequence)
@@ -872,7 +901,7 @@ func (s *Store) LoadTaskInputsAfter(ctx context.Context, taskID string, afterSeq
 	for rows.Next() {
 		var record agent.ContextRecord
 		var encodedRef string
-		if err := rows.Scan(&record.Sequence, &record.ID, &record.Kind, &record.Role, &encodedRef); err != nil {
+		if err := rows.Scan(&record.Sequence, &record.ID, &record.TaskID, &record.DeliveryID, &record.Kind, &record.Role, &encodedRef); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(encodedRef), &record.ContentRef); err != nil {
@@ -882,6 +911,50 @@ func (s *Store) LoadTaskInputsAfter(ctx context.Context, taskID string, afterSeq
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for index := range records {
+		attachments, err := listInteractionAttachments(ctx, s.db, records[index].ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, attachment := range attachments {
+			records[index].Attachments = append(records[index].Attachments, agent.ContextAttachment{
+				ID: attachment.ID, Name: attachment.Name, MediaType: attachment.MediaType,
+				SizeBytes: attachment.SizeBytes, ContentRef: attachment.ContentRef,
+			})
+		}
+	}
+	return records, nil
+}
+
+// LoadConversationUpdatesAfter returns authoritative messages produced by
+// other Tasks while taskID was running or waiting. They are context evidence,
+// not amendments to the resumed Task.
+func (s *Store) LoadConversationUpdatesAfter(ctx context.Context, taskID string, afterSequence int64) ([]agent.ContextRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT i.sequence, i.id, i.task_id, COALESCE(i.delivery_id, ''), i.kind, i.role, i.content_ref_json
+		FROM interactions i
+		JOIN tasks current ON current.id = ? AND current.conversation_id = i.conversation_id
+		WHERE i.task_id != ? AND i.sequence > ? AND i.kind != 'internal_trigger'
+		ORDER BY i.sequence`, taskID, taskID, afterSequence)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	records := make([]agent.ContextRecord, 0)
+	for rows.Next() {
+		var record agent.ContextRecord
+		var encodedRef string
+		if err := rows.Scan(&record.Sequence, &record.ID, &record.TaskID, &record.DeliveryID, &record.Kind, &record.Role, &encodedRef); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(encodedRef), &record.ContentRef); err != nil {
+			return nil, err
+		}
+		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -1027,6 +1100,18 @@ func (s *Store) UpdateInvocationContext(ctx context.Context, invocationID, manif
 	return nil
 }
 
+func conversationAdvanced(ctx context.Context, tx *sql.Tx, taskID string, basisSequence int64) (bool, error) {
+	var latest int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(i.sequence), 0)
+		FROM interactions i
+		JOIN tasks current ON current.id = ? AND current.conversation_id = i.conversation_id
+		WHERE i.task_id != ? AND i.kind != 'internal_trigger'`, taskID, taskID).Scan(&latest); err != nil {
+		return false, err
+	}
+	return latest > basisSequence, nil
+}
+
 func (s *Store) CommitArtifact(ctx context.Context, commit agent.Commit) error {
 	now := time.Now().UTC()
 	if commit.EvalFindingsRef.ObjectID == "" {
@@ -1066,6 +1151,15 @@ func (s *Store) CommitArtifact(ctx context.Context, commit agent.Commit) error {
 		}
 		if latestInputSequence > commit.BasisInputSequence {
 			return agent.ErrStaleTaskInput
+		}
+	}
+	if commit.BasisConversationSequence > 0 {
+		advanced, err := conversationAdvanced(ctx, tx, commit.TaskID, commit.BasisConversationSequence)
+		if err != nil {
+			return err
+		}
+		if advanced {
+			return agent.ErrStaleConversationContext
 		}
 	}
 	var existing int
@@ -1223,6 +1317,15 @@ func (s *Store) CommitProgress(ctx context.Context, progress agent.ProgressCommi
 		}
 		if latestInputSequence > commit.BasisInputSequence {
 			return false, agent.ErrStaleTaskInput
+		}
+	}
+	if commit.BasisConversationSequence > 0 {
+		advanced, err := conversationAdvanced(ctx, tx, commit.TaskID, commit.BasisConversationSequence)
+		if err != nil {
+			return false, err
+		}
+		if advanced {
+			return false, agent.ErrStaleConversationContext
 		}
 	}
 	var existing int
@@ -1790,6 +1893,15 @@ func (s *Store) PlanIntent(ctx context.Context, intent tool.Intent) (tool.Intent
 		}
 		if latestInputSequence > intent.BasisInputSequence {
 			return tool.Intent{}, false, tool.ErrStaleTaskInput
+		}
+	}
+	if intent.BasisConversationSequence > 0 {
+		advanced, err := conversationAdvanced(ctx, tx, intent.TaskID, intent.BasisConversationSequence)
+		if err != nil {
+			return tool.Intent{}, false, err
+		}
+		if advanced {
+			return tool.Intent{}, false, tool.ErrStaleConversationContext
 		}
 	}
 	if intent.ParentIntentID != "" {

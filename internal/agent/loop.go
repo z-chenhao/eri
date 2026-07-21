@@ -43,7 +43,7 @@ type loopDriver struct {
 func (s *Service) continueLoop(ctx context.Context, task TaskContext, request ModelRequest, modelToolIDs map[string]string, state loopState) error {
 	driver := loopDriver{
 		model: s.model, tools: s.tools, loop: s.loop, logger: s.logger,
-		compact: s.compactLoopContext, refresh: s.refreshTaskInputs, cancel: s.cancelIfRequested, checkpoint: s.saveAgentCheckpoint,
+		compact: s.compactLoopContext, refresh: s.refreshAuthoritativeContext, cancel: s.cancelIfRequested, checkpoint: s.saveAgentCheckpoint,
 		progress: s.commitIntermediateProgress,
 		execute:  s.executeCalls, candidate: s.evaluateAndCommitCandidate,
 		fail: func(ctx context.Context, task TaskContext, request ModelRequest, usage Usage, code string, trace runTrace) error {
@@ -267,7 +267,7 @@ func runAgentLoop(ctx context.Context, driver loopDriver, task TaskContext, requ
 		}
 		observationStart := len(request.Messages)
 		paused, err := driver.execute(ctx, task, &request, response.Message.ToolCalls, modelToolIDs, &state, nil)
-		if errors.Is(err, ErrStaleTaskInput) {
+		if errors.Is(err, ErrStaleTaskInput) || errors.Is(err, ErrStaleConversationContext) {
 			retained, closeErr := closeInterruptedToolFrame(&request, assistantIndex, modelToolIDs, &state)
 			if closeErr != nil {
 				return driver.fail(ctx, task, request, state.Usage, "invalid_model_transcript", state.Trace)
@@ -537,6 +537,17 @@ func (s *Service) evaluateAndCommitCandidate(
 		state.NextTurnTrigger = "user_input"
 		return request, true, nil
 	}
+	conversationChanged, err := s.refreshConversationUpdates(ctx, task, &request, state)
+	if err != nil {
+		return request, false, err
+	}
+	if conversationChanged {
+		removeMessageAt(&request, candidateIndex)
+		markLatestTurnSuperseded(state)
+		s.logger.Info("candidate superseded by newer Conversation context before Eval", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "invocation_id", task.InvocationID, "conversation_sequence", state.ConversationSequence)
+		state.NextTurnTrigger = "conversation_update"
+		return request, true, nil
+	}
 	body := strings.TrimSpace(request.Messages[len(request.Messages)-1].Content)
 	evaluationStartedAt := time.Now().UTC()
 	modelTurnID := latestModelTurnID(state)
@@ -574,6 +585,17 @@ func (s *Service) evaluateAndCommitCandidate(
 		state.NextTurnTrigger = "user_input"
 		return request, true, nil
 	}
+	conversationChanged, err = s.refreshConversationUpdates(ctx, task, &request, state)
+	if err != nil {
+		return request, false, err
+	}
+	if conversationChanged {
+		removeMessageAt(&request, candidateIndex)
+		markLatestTurnSuperseded(state)
+		s.logger.Info("candidate superseded by newer Conversation context during Eval", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "invocation_id", task.InvocationID, "conversation_sequence", state.ConversationSequence)
+		state.NextTurnTrigger = "conversation_update"
+		return request, true, nil
+	}
 	state.EvalAttempts++
 	state.Trace.Evaluations = append(state.Trace.Evaluations, evaluationTrace{
 		ID: modelTurnID + ":eval:" + strconv.Itoa(evaluationAttempt), ModelTurnID: modelTurnID, Attempt: evaluationAttempt,
@@ -609,7 +631,7 @@ func (s *Service) evaluateAndCommitCandidate(
 	if state.PendingDeferred != nil {
 		return request, false, s.pauseForSubagent(ctx, task, *state, request, modelToolIDs, body, decision.Tier)
 	}
-	err = s.commitEvaluatedReply(ctx, task, traceWithProviderTranscript(state.Trace, request), state.Usage, body, "text", decision.Tier, state.EvalFindings, state.Attachments, state.InputSequence)
+	err = s.commitEvaluatedReply(ctx, task, traceWithProviderTranscript(state.Trace, request), state.Usage, body, "text", decision.Tier, state.EvalFindings, state.Attachments, state.InputSequence, state.ConversationSequence)
 	if errors.Is(err, ErrStaleTaskInput) {
 		changed, refreshErr := s.refreshTaskInputs(ctx, task, &request, state)
 		if refreshErr != nil {
@@ -624,6 +646,23 @@ func (s *Service) evaluateAndCommitCandidate(
 			markLatestTurnSuperseded(state)
 			s.logger.Info("candidate superseded at durable commit fence", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "invocation_id", task.InvocationID, "input_sequence", state.InputSequence)
 			state.NextTurnTrigger = "user_input"
+			return request, true, nil
+		}
+	}
+	if errors.Is(err, ErrStaleConversationContext) {
+		changed, refreshErr := s.refreshConversationUpdates(ctx, task, &request, state)
+		if refreshErr != nil {
+			return request, false, refreshErr
+		}
+		if changed {
+			if state.EvalAttempts > 0 {
+				state.EvalAttempts--
+			}
+			state.EvalFindings = state.EvalFindings[:findingsStart]
+			removeMessageAt(&request, candidateIndex)
+			markLatestTurnSuperseded(state)
+			s.logger.Info("candidate superseded at Conversation commit fence", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "invocation_id", task.InvocationID, "conversation_sequence", state.ConversationSequence)
+			state.NextTurnTrigger = "conversation_update"
 			return request, true, nil
 		}
 	}
@@ -840,7 +879,7 @@ func (s *Service) executeRecoveredCalls(ctx context.Context, task TaskContext, r
 func (s *Service) executeCallsWithRecovery(ctx context.Context, task TaskContext, request *ModelRequest, calls []ToolCall, modelToolIDs map[string]string, state *loopState, grant *tool.Grant, recoverFirst bool) (bool, error) {
 	for index, call := range calls {
 		if !recoverFirst || index > 0 {
-			changed, err := s.refreshTaskInputs(ctx, task, request, state)
+			changed, err := s.refreshAuthoritativeContext(ctx, task, request, state)
 			if err != nil {
 				return false, err
 			}
@@ -869,13 +908,20 @@ func (s *Service) executeCallsWithRecovery(ctx context.Context, task TaskContext
 		s.logger.Info("tool call started", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "invocation_id", task.InvocationID, "tool_id", toolID, "tool_call_id", call.ID)
 		outcome, invokeErr := s.tools.Invoke(ctx, tool.Request{
 			TaskID: task.TaskID, RunID: task.RunID, InvocationID: task.InvocationID,
-			ToolCallID: call.ID, BasisInputSequence: state.InputSequence, ToolID: toolID, Input: call.Arguments, Grant: callGrant,
+			ToolCallID: call.ID, BasisInputSequence: state.InputSequence,
+			BasisConversationSequence: state.ConversationSequence, ToolID: toolID, Input: call.Arguments, Grant: callGrant,
 		})
 		if errors.Is(invokeErr, tool.ErrStaleTaskInput) {
 			if _, err := s.refreshTaskInputs(ctx, task, request, state); err != nil {
 				return false, err
 			}
 			return false, ErrStaleTaskInput
+		}
+		if errors.Is(invokeErr, tool.ErrStaleConversationContext) {
+			if _, err := s.refreshConversationUpdates(ctx, task, request, state); err != nil {
+				return false, err
+			}
+			return false, ErrStaleConversationContext
 		}
 		s.logger.Info("tool call finished", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "invocation_id", task.InvocationID, "tool_id", toolID, "tool_call_id", call.ID, "intent_id", outcome.Intent.ID, "status", outcome.Intent.Status, "approval_required", outcome.ApprovalRequired, "duration_ms", time.Since(toolStarted).Milliseconds(), "error_code", outcome.Intent.ErrorCode)
 		if outcome.ApprovalRequired {

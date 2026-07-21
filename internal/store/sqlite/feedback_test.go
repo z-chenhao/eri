@@ -9,7 +9,9 @@ import (
 
 	"github.com/z-chenhao/eri/internal/content"
 	"github.com/z-chenhao/eri/internal/episode"
+	"github.com/z-chenhao/eri/internal/evolution"
 	"github.com/z-chenhao/eri/internal/feedback"
+	"github.com/z-chenhao/eri/internal/runtime"
 )
 
 func TestCorrectiveFeedbackLinksDeliveryInvalidatesOldDerivedDataAndCandidatesReplacement(t *testing.T) {
@@ -66,6 +68,31 @@ func TestCorrectiveFeedbackLinksDeliveryInvalidatesOldDerivedDataAndCandidatesRe
 	}
 	if oldEpisode != "invalidated" || oldCandidate != "invalidated" {
 		t.Fatalf("old derived data episode=%q candidate=%q", oldEpisode, oldCandidate)
+	}
+	var posteriorOutbox int
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM internal_outbox
+		WHERE kind = 'evolution.feedback' AND aggregate_id = ?`, record.ID).Scan(&posteriorOutbox); err != nil || posteriorOutbox != 1 {
+		t.Fatalf("posterior evolution outbox=%d err=%v", posteriorOutbox, err)
+	}
+	evolutionService, err := evolution.NewService(store, contentStore, evolutionProposalModel{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := evolutionService.HandleFeedback(ctx, runtime.OutboxItem{AggregateID: record.ID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var signalCount int
+	var signalResult, signalRefJSON string
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), result, findings_ref_json FROM evolution_signals WHERE id = ?`, record.ID).
+		Scan(&signalCount, &signalResult, &signalRefJSON); err != nil {
+		t.Fatal(err)
+	}
+	if signalCount != 1 || signalResult != "repair" || signalRefJSON == "" {
+		t.Fatalf("posterior evolution signal count=%d result=%q ref=%q", signalCount, signalResult, signalRefJSON)
 	}
 	manifestRef, err := contentStore.Put(ctx, []byte(`{"task_id":"feedback-task"}`), content.Metadata{
 		MediaType: "application/json", EncryptionDomain: "episode", PrivacyClass: "private", RetentionPolicy: "user_owned",
