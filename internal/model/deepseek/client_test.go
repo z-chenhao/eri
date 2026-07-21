@@ -29,7 +29,7 @@ func TestClientUsesNativeToolsAndParsesCacheUsage(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"choices": []any{map[string]any{
 				"finish_reason": "tool_calls",
-				"message": map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+				"message": map[string]any{"role": "assistant", "content": nil, "reasoning_content": "I should read the requested file before answering.", "tool_calls": []any{
 					map[string]any{"id": "call-1", "type": "function", "function": map[string]any{"name": "builtin_files", "arguments": `{"operation":"read","path":"brief.txt"}`}},
 				}},
 			}},
@@ -49,10 +49,10 @@ func TestClientUsesNativeToolsAndParsesCacheUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if observed.Thinking["type"] != "disabled" || observed.ToolChoice != "auto" || observed.MaxTokens != nil || observed.ReasoningEffort != "" {
+	if observed.Thinking["type"] != "enabled" || observed.ReasoningEffort != "high" || observed.ToolChoice != "" || observed.Temperature != nil || observed.MaxTokens != nil {
 		t.Fatalf("request = %+v", observed)
 	}
-	if len(response.Message.ToolCalls) != 1 || !json.Valid(response.Message.ToolCalls[0].Arguments) {
+	if response.Message.ReasoningContent != "I should read the requested file before answering." || len(response.Message.ToolCalls) != 1 || !json.Valid(response.Message.ToolCalls[0].Arguments) {
 		t.Fatalf("tool response = %+v", response.Message)
 	}
 	if response.Usage.CacheHitTokens != 100 || response.Usage.CacheMissTokens != 20 {
@@ -79,6 +79,83 @@ func TestClientUsesThinkingForToolFreeJudgment(t *testing.T) {
 	}
 	if observed.Thinking["type"] != "enabled" || observed.ReasoningEffort != "high" || observed.ToolChoice != "" || observed.Temperature != nil || observed.MaxTokens != nil || observed.ResponseFormat == nil || observed.ResponseFormat.Type != "json_object" {
 		t.Fatalf("tool-free request = %+v", observed)
+	}
+}
+
+func TestClientReplaysReasoningContentForToolHistoryWithoutCurrentTools(t *testing.T) {
+	t.Parallel()
+	var observed chatRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&observed); err != nil {
+			t.Fatal(err)
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]any{"role": "assistant", "content": `{"result":"pass"}`}}},
+			"usage":   map[string]any{"prompt_tokens": 24, "completion_tokens": 4},
+		})
+	}))
+	defer server.Close()
+	client, _ := New(server.URL, "test-secret", "deepseek-v4-flash", time.Second)
+	_, err := client.Complete(context.Background(), agent.ModelRequest{
+		System: "return JSON",
+		Messages: []agent.Message{
+			{Role: "user", Content: "look it up"},
+			{Role: "assistant", ReasoningContent: "I need a governed lookup before judging the claim.", ToolCalls: []agent.ToolCall{{ID: "call-1", Name: "lookup", Arguments: json.RawMessage(`{}`)}}},
+			{Role: "tool", ToolCallID: "call-1", Content: `{"found":true}`},
+			{Role: "assistant", Content: "I found a reliable source and am checking one more detail."},
+			{Role: "user", Content: "evaluate the progress candidate"},
+		},
+		JSONOutput: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.Thinking["type"] != "enabled" || observed.ReasoningEffort != "high" || observed.ToolChoice != "" || observed.Temperature != nil {
+		t.Fatalf("historical tool request = %+v", observed)
+	}
+	if len(observed.Messages) < 3 || observed.Messages[2].ReasoningContent != "I need a governed lookup before judging the claim." {
+		t.Fatalf("historical reasoning_content was not replayed: %+v", observed.Messages)
+	}
+}
+
+func TestClientRejectsThinkingToolCallWithoutReasoningContent(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{
+				"finish_reason": "tool_calls",
+				"message": map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+					map[string]any{"id": "call-1", "type": "function", "function": map[string]any{"name": "lookup", "arguments": `{}`}},
+				}},
+			}},
+			"usage": map[string]any{"prompt_tokens": 12, "completion_tokens": 3},
+		})
+	}))
+	defer server.Close()
+	client, _ := New(server.URL, "test-secret", "deepseek-v4-flash", time.Second)
+	_, err := client.Complete(context.Background(), agent.ModelRequest{
+		Messages: []agent.Message{{Role: "user", Content: "look it up"}},
+		Tools:    []agent.ToolDefinition{{Name: "lookup", Parameters: map[string]any{"type": "object"}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "omitted reasoning_content") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestClientRejectsToolHistoryWithoutReasoningBeforeDispatch(t *testing.T) {
+	t.Parallel()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requests++
+	}))
+	defer server.Close()
+	client, _ := New(server.URL, "test-secret", "deepseek-v4-flash", time.Second)
+	_, err := client.Complete(context.Background(), agent.ModelRequest{Messages: []agent.Message{
+		{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1", Name: "lookup", Arguments: json.RawMessage(`{}`)}}},
+		{Role: "tool", ToolCallID: "call-1", Content: `{"found":true}`},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "without reasoning_content") || requests != 0 {
+		t.Fatalf("requests=%d error=%v", requests, err)
 	}
 }
 
@@ -134,7 +211,7 @@ func TestClientRequestPrefixRemainsByteStableAcrossToolTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	base.Messages = append(base.Messages,
-		agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call", Name: "lookup", Arguments: json.RawMessage(`{}`)}}},
+		agent.Message{Role: "assistant", ReasoningContent: "I need the lookup result.", ToolCalls: []agent.ToolCall{{ID: "call", Name: "lookup", Arguments: json.RawMessage(`{}`)}}},
 		agent.Message{Role: "tool", ToolCallID: "call", Content: `{"ok":true}`},
 	)
 	if _, err := client.Complete(context.Background(), base); err != nil {
@@ -254,5 +331,47 @@ func TestLivePromptCacheProbe(t *testing.T) {
 	t.Logf("second usage: input=%d output=%d cache_hit=%d cache_miss=%d", second.Usage.InputTokens, second.Usage.OutputTokens, second.Usage.CacheHitTokens, second.Usage.CacheMissTokens)
 	if second.Usage.CacheHitTokens <= 0 {
 		t.Fatal("second request reported no cache hit; do not claim live cache verification")
+	}
+}
+
+func TestLiveThinkingToolReasoningReplay(t *testing.T) {
+	if os.Getenv("ERI_DEEPSEEK_LIVE_TEST") != "1" {
+		t.Skip("set ERI_DEEPSEEK_LIVE_TEST=1 for the bounded thinking Tool replay probe")
+	}
+	key := strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
+	if key == "" {
+		t.Fatal("DEEPSEEK_API_KEY is required for the live thinking Tool replay probe")
+	}
+	model := strings.TrimSpace(os.Getenv("ERI_MODEL"))
+	if model == "" {
+		model = "deepseek-v4-flash"
+	}
+	client, err := New("https://api.deepseek.com", key, model, 90*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := agent.ModelRequest{
+		System:   "This is a controlled provider protocol probe. Use the supplied inert tool exactly once, then report its confirmed result.",
+		Messages: []agent.Message{{Role: "user", Content: "Record the marker alpha with the inert tool."}},
+		Tools: []agent.ToolDefinition{{
+			Name: "record_marker", Description: "Records one inert test marker.",
+			Parameters: map[string]any{
+				"type": "object", "properties": map[string]any{"marker": map[string]any{"type": "string"}}, "required": []string{"marker"},
+			},
+		}},
+	}
+	first, err := client.Complete(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Message.ToolCalls) == 0 || strings.TrimSpace(first.Message.ReasoningContent) == "" {
+		t.Fatalf("thinking Tool response did not include the native protocol fields: finish=%s calls=%d reasoning=%t", first.FinishReason, len(first.Message.ToolCalls), first.Message.ReasoningContent != "")
+	}
+	request.Messages = append(request.Messages, first.Message)
+	for _, call := range first.Message.ToolCalls {
+		request.Messages = append(request.Messages, agent.Message{Role: "tool", ToolCallID: call.ID, Content: `{"recorded":true}`})
+	}
+	if _, err := client.Complete(context.Background(), request); err != nil {
+		t.Fatalf("replay reasoning_content with Tool result: %v", err)
 	}
 }

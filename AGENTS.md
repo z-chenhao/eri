@@ -62,7 +62,7 @@ README embeds [`docs/assets/eri-architecture-handdrawn.svg`](docs/assets/eri-arc
 - A Model may return candidate text or request native Tool Calls. It cannot grant authority, write databases directly, or bypass Policy.
 - Persist an intent and idempotency key before any external side effect. Dangerous actions require strong approval.
 - Every outward delivery passes Eval and is sent and reconciled through the Outbox.
-- Never retain private model reasoning. Store only provider-visible messages, Tool Calls and Results, governed Trace, Observation, and outcomes.
+- Preserve provider-required continuation state such as `reasoning_content` with its assistant Message inside the encrypted model transcript and Agent checkpoints so later model calls and crash recovery can replay the native protocol exactly. Never expose it through Delivery, logs, Observatory, Memory, Episodes, datasets, or evolution.
 - Memory, Eval, Episode, evolution, and observability changes must preserve source, version, deletion lineage, and privacy boundaries.
 
 ## Engineering
