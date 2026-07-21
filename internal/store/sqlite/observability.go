@@ -16,13 +16,12 @@ import (
 func (s *Store) ListRuns(ctx context.Context, limit int) ([]observability.RunSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT r.id, r.task_id, r.status, r.soul_version, r.started_at, COALESCE(r.ended_at, ''),
-			COALESCE(SUM(CAST(json_extract(i.usage_json, '$.model_calls') AS INTEGER)), 0),
+			COALESCE(CAST(json_extract(r.usage_json, '$.model_calls') AS INTEGER), 0),
 			(SELECT COUNT(*) FROM effect_intents e WHERE e.run_id = r.id),
-			COALESCE(SUM(CAST(json_extract(i.usage_json, '$.input_tokens') AS INTEGER)), 0),
-			COALESCE(SUM(CAST(json_extract(i.usage_json, '$.output_tokens') AS INTEGER)), 0),
-			SUM(CASE WHEN i.status IN ('failed', 'unknown') THEN 1 ELSE 0 END)
-		FROM runs r LEFT JOIN invocations i ON i.run_id = r.id
-		GROUP BY r.id ORDER BY r.started_at DESC LIMIT ?`, limit)
+			COALESCE(CAST(json_extract(r.usage_json, '$.input_tokens') AS INTEGER), 0),
+			COALESCE(CAST(json_extract(r.usage_json, '$.output_tokens') AS INTEGER), 0),
+			CASE WHEN r.model_status IN ('failed', 'unknown') THEN 1 ELSE 0 END
+		FROM runs r ORDER BY r.started_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -73,57 +72,48 @@ func (s *Store) LoadRun(ctx context.Context, id string) (observability.RunDetail
 		}
 	}
 	ids := []string{id, detail.Run.TaskID}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, kind, status, target, context_manifest_json, COALESCE(usage_json, '{}'), COALESCE(error_code, ''), created_at, updated_at FROM invocations WHERE run_id = ? ORDER BY created_at`, id)
+	var model observability.ModelExecution
+	var contextJSON, usageJSON, created, updated string
+	err = s.db.QueryRowContext(ctx, `
+		SELECT id, model_status, target, context_manifest_json, COALESCE(usage_json, '{}'),
+			COALESCE(error_code, ''), started_at, COALESCE(NULLIF(updated_at, ''), started_at)
+		FROM runs WHERE id = ?`, id).Scan(
+		&model.ID, &model.Status, &model.Target, &contextJSON,
+		&usageJSON, &model.ErrorCode, &created, &updated)
 	if err != nil {
 		return observability.RunDetail{}, false, err
 	}
-	for rows.Next() {
-		var invocation observability.Invocation
-		var contextJSON, usageJSON, created, updated string
-		if err := rows.Scan(&invocation.ID, &invocation.Kind, &invocation.Status, &invocation.Target, &contextJSON, &usageJSON, &invocation.ErrorCode, &created, &updated); err != nil {
-			rows.Close()
+	if err := json.Unmarshal([]byte(contextJSON), &model.ContextManifest); err != nil {
+		return observability.RunDetail{}, false, fmt.Errorf("decode run %s context manifest: %w", model.ID, err)
+	}
+	if model.ContextManifest.MemoryRetrievalID != "" {
+		usedRows, err := s.db.QueryContext(ctx, `
+				SELECT memory_id FROM memory_retrieval_items
+			WHERE retrieval_id = ? AND used = 1 ORDER BY rank`, model.ContextManifest.MemoryRetrievalID)
+		if err != nil {
 			return observability.RunDetail{}, false, err
 		}
-		if err := json.Unmarshal([]byte(contextJSON), &invocation.ContextManifest); err != nil {
-			rows.Close()
-			return observability.RunDetail{}, false, fmt.Errorf("decode invocation %s context manifest: %w", invocation.ID, err)
-		}
-		if invocation.ContextManifest.MemoryRetrievalID != "" {
-			usedRows, err := s.db.QueryContext(ctx, `
-				SELECT memory_id FROM memory_retrieval_items
-				WHERE retrieval_id = ? AND used = 1 ORDER BY rank`, invocation.ContextManifest.MemoryRetrievalID)
-			if err != nil {
-				rows.Close()
+		for usedRows.Next() {
+			var memoryID string
+			if err := usedRows.Scan(&memoryID); err != nil {
+				usedRows.Close()
 				return observability.RunDetail{}, false, err
 			}
-			for usedRows.Next() {
-				var memoryID string
-				if err := usedRows.Scan(&memoryID); err != nil {
-					usedRows.Close()
-					rows.Close()
-					return observability.RunDetail{}, false, err
-				}
-				invocation.ContextManifest.AppliedMemoryIDs = append(invocation.ContextManifest.AppliedMemoryIDs, memoryID)
-			}
-			if err := usedRows.Close(); err != nil {
-				rows.Close()
-				return observability.RunDetail{}, false, err
-			}
+			model.ContextManifest.AppliedMemoryIDs = append(model.ContextManifest.AppliedMemoryIDs, memoryID)
 		}
-		invocation.Usage = decodeObject(usageJSON)
-		invocation.CreatedAt, _ = parseTime(created)
-		invocation.UpdatedAt, _ = parseTime(updated)
-		detail.Invocations = append(detail.Invocations, invocation)
-		detail.Run.ModelCalls += intFromMap(invocation.Usage, "model_calls")
-		detail.Run.InputTokens += intFromMap(invocation.Usage, "input_tokens")
-		detail.Run.OutputTokens += intFromMap(invocation.Usage, "output_tokens")
-		if invocation.Status == "failed" || invocation.Status == "unknown" {
-			detail.Run.Errors++
+		if err := usedRows.Close(); err != nil {
+			return observability.RunDetail{}, false, err
 		}
-		ids = append(ids, invocation.ID)
 	}
-	if err := rows.Close(); err != nil {
-		return observability.RunDetail{}, false, err
+	model.Usage = decodeObject(usageJSON)
+	model.CreatedAt, _ = parseTime(created)
+	model.UpdatedAt, _ = parseTime(updated)
+	detail.Model = model
+	detail.Run.ModelCalls += intFromMap(model.Usage, "model_calls")
+	detail.Run.InputTokens += intFromMap(model.Usage, "input_tokens")
+	detail.Run.OutputTokens += intFromMap(model.Usage, "output_tokens")
+	if model.Status == "failed" || model.Status == "unknown" {
+		detail.Run.Errors++
 	}
 	effectRows, err := s.db.QueryContext(ctx, `SELECT id, invocation_id, tool_call_id, COALESCE(parent_intent_id, ''), tool_id, effect_class, target, control_level, COALESCE(approval_id, ''), status, COALESCE(error_code, ''), payload_ref_json, COALESCE(result_ref_json, '{}'), created_at, updated_at FROM effect_intents WHERE run_id = ? ORDER BY created_at`, id)
 	if err != nil {

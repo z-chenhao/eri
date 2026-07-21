@@ -213,8 +213,11 @@ func (m *nativeDelegationIntegrationModel) Complete(_ context.Context, request a
 		}, nil
 	case 3:
 		last := request.Messages[len(request.Messages)-1]
-		if last.Role != "system" || !strings.Contains(last.Content, "intern has reached a terminal state") || !strings.Contains(last.Content, `"status":"completed"`) {
+		if last.Role != "system" || !strings.Contains(last.Content, `type="subagent.terminal"`) || !strings.Contains(last.Content, `role_id="intern"`) || !strings.Contains(last.Content, `status="completed"`) {
 			return agent.ModelResponse{}, fmt.Errorf("terminal Intern result missing: %+v", last)
+		}
+		if !hasFinalDelegationObservation(request.Messages, "delegate-intern-1", "intern") {
+			return agent.ModelResponse{}, fmt.Errorf("final Intern tool observation missing")
 		}
 		return agent.ModelResponse{
 			Message:      agent.Message{Role: "assistant", Content: "The intern finished. I reviewed the result: the scoped material was consistent."},
@@ -256,8 +259,11 @@ func (m *codexDelegationIntegrationModel) Complete(_ context.Context, request ag
 			return agent.ModelResponse{}, fmt.Errorf("primary Eri tools were not restored after engineering-team completion")
 		}
 		last := request.Messages[len(request.Messages)-1]
-		if last.Role != "system" || !strings.Contains(last.Content, "engineering_team has reached a terminal state") || !strings.Contains(last.Content, `"status":"completed"`) {
+		if last.Role != "system" || !strings.Contains(last.Content, `type="subagent.terminal"`) || !strings.Contains(last.Content, `role_id="engineering_team"`) || !strings.Contains(last.Content, `status="completed"`) {
 			return agent.ModelResponse{}, fmt.Errorf("terminal engineering-team result missing: %+v", last)
+		}
+		if !hasFinalDelegationObservation(request.Messages, "delegate-codex-1", "engineering_team") {
+			return agent.ModelResponse{}, fmt.Errorf("final engineering-team tool observation missing")
 		}
 		return agent.ModelResponse{
 			Message:      agent.Message{Role: "assistant", Content: "The engineering team finished the inspection. I reviewed its result: the workspace evidence was verified, and no files were changed."},
@@ -266,6 +272,18 @@ func (m *codexDelegationIntegrationModel) Complete(_ context.Context, request ag
 	default:
 		return agent.ModelResponse{}, fmt.Errorf("unexpected main-agent model call %d", call)
 	}
+}
+
+func hasFinalDelegationObservation(messages []agent.Message, toolCallID, roleID string) bool {
+	for _, message := range messages {
+		if message.Role == "tool" && message.ToolCallID == toolCallID &&
+			strings.Contains(message.Content, `"kind":"subagent_result"`) &&
+			strings.Contains(message.Content, `"role_id":"`+roleID+`"`) &&
+			strings.Contains(message.Content, `"success":true`) {
+			return true
+		}
+	}
+	return false
 }
 
 type blockingCodexRunner struct {
@@ -732,14 +750,14 @@ func (m *reminderBehaviorModel) Complete(_ context.Context, request agent.ModelR
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: "I will remind you to check your travel documents on time."}, FinishReason: "stop", Usage: agent.Usage{Provider: "fake", Model: "reminder", ModelCalls: 1}}, nil
 	case 3:
 		foundTrigger := false
-		foundOccurredEventFrame := false
 		foundNotification := false
 		for _, message := range request.Messages {
-			foundTrigger = foundTrigger || strings.Contains(message.Content, "A durable commitment is due") && strings.Contains(message.Content, "Check travel documents")
-			foundOccurredEventFrame = foundOccurredEventFrame || strings.Contains(message.Content, `"trigger_event":"commitment.due"`) &&
-				strings.Contains(message.Content, `"trigger_state":"occurred"`) &&
-				strings.Contains(message.Content, `"execution_phase":"fulfillment"`) &&
-				strings.Contains(message.Content, "trigger registration is already complete")
+			foundTrigger = foundTrigger || message.Role == "system" && strings.Contains(message.Content, "A durable commitment is due") && strings.Contains(message.Content, "Check travel documents")
+			for _, removed := range []string{"<current_task>", "<task_objective>", "<current_step>", `"trigger_event":"commitment.due"`} {
+				if strings.Contains(message.Content, removed) {
+					return agent.ModelResponse{}, fmt.Errorf("fulfillment contains removed prompt frame %q: %+v", removed, request.Messages)
+				}
+			}
 			if strings.Contains(message.Content, "Remind me later to check my travel documents") ||
 				strings.Contains(message.Content, "I will remind you to check your travel documents on time") {
 				return agent.ModelResponse{}, fmt.Errorf("fulfillment replayed registration conversation: %+v", request.Messages)
@@ -753,9 +771,6 @@ func (m *reminderBehaviorModel) Complete(_ context.Context, request agent.ModelR
 		}
 		if !foundTrigger {
 			return agent.ModelResponse{}, fmt.Errorf("durable trigger context missing: %+v", request.Messages)
-		}
-		if !foundOccurredEventFrame {
-			return agent.ModelResponse{}, fmt.Errorf("occurred event task frame missing: %+v", request.Messages)
 		}
 		if !foundNotification {
 			return agent.ModelResponse{}, fmt.Errorf("important reminder notification capability missing")
@@ -989,7 +1004,7 @@ func TestDaemonReliableReplyEndToEnd(t *testing.T) {
 	}
 	episodeService := episode.NewService(d.store, contentStore)
 	manifest, found, err := episodeService.Export(ctx, episodes[0].ID)
-	if err != nil || !found || manifest.TaskID != sent.TaskID || len(manifest.Invocations) != 1 || len(manifest.Artifacts) != 1 {
+	if err != nil || !found || manifest.TaskID != sent.TaskID || len(manifest.Runs) != 1 || len(manifest.Artifacts) != 1 {
 		t.Fatalf("episode manifest = %+v, found = %v, err = %v", manifest, found, err)
 	}
 	encodedManifest, _ := json.Marshal(manifest)
@@ -1040,7 +1055,7 @@ func TestDaemonReliableReplyEndToEnd(t *testing.T) {
 		`"msg":"durable runtime recovery completed"`, `"running_tasks":0`, `"outbox_items":0`, `"ambiguous_effects":0`,
 		`"msg":"Eri daemon started"`, `"msg":"model call started"`, `"msg":"evaluation finished"`,
 		`"msg":"outbox dispatch completed"`, `"msg":"Eri daemon stopped"`,
-		`"task_id":"` + sent.TaskID + `"`, `"run_id":"`, `"invocation_id":"`, `"duration_ms":`,
+		`"task_id":"` + sent.TaskID + `"`, `"run_id":"`, `"execution_id":"`, `"duration_ms":`,
 	} {
 		if !bytes.Contains(logBody, []byte(required)) {
 			t.Fatalf("daemon log is missing %q: %s", required, logBody)

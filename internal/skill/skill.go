@@ -26,7 +26,6 @@ const (
 )
 
 var standardName = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
-var explicitMention = regexp.MustCompile(`(?:^|[[:space:]])\$([a-z0-9]+(?:-[a-z0-9]+)*)`)
 
 // Metadata is the portable SKILL.md frontmatter. DisableModelInvocation is a
 // widely used client extension; unknown extensions are deliberately ignored.
@@ -275,15 +274,15 @@ func (c *Catalog) Names(ctx context.Context) ([]string, error) {
 }
 
 func (c *Catalog) Activate(ctx context.Context, name string) (Document, error) {
-	return c.activate(ctx, name, false)
+	return c.activate(ctx, name)
 }
 
-func (c *Catalog) activate(ctx context.Context, name string, allowModelDisabled bool) (Document, error) {
+func (c *Catalog) activate(ctx context.Context, name string) (Document, error) {
 	if err := ctx.Err(); err != nil {
 		return Document{}, err
 	}
 	candidate, found := c.entries[strings.TrimSpace(name)]
-	if !found || (candidate.metadata.DisableModelInvocation && !allowModelDisabled) {
+	if !found || candidate.metadata.DisableModelInvocation {
 		return Document{}, fmt.Errorf("skill %q is not available for model activation", name)
 	}
 	body, err := readEntryFile(candidate, path.Join(candidate.directory, "SKILL.md"), maxSkillBytes)
@@ -309,51 +308,6 @@ func (c *Catalog) activate(ctx context.Context, name string, allowModelDisabled 
 		Instructions: instructions, Resources: resources,
 		Directory: strings.TrimSuffix(candidate.info.Location, "/SKILL.md"),
 	}, nil
-}
-
-// Explicit resolves portable mention-style invocations. Eri accepts the Codex
-// $name form and Pi's /skill:name form without making either client extension
-// part of the SKILL.md format.
-func (c *Catalog) Explicit(ctx context.Context, input string) ([]Document, error) {
-	names := make([]string, 0)
-	for _, match := range explicitMention.FindAllStringSubmatch(input, -1) {
-		if len(match) > 1 {
-			names = append(names, match[1])
-		}
-	}
-	trimmed := strings.TrimSpace(input)
-	if strings.HasPrefix(trimmed, "/skill:") {
-		fields := strings.Fields(strings.TrimPrefix(trimmed, "/skill:"))
-		if len(fields) > 0 {
-			names = append(names, trimInvocationPunctuation(fields[0]))
-		}
-	} else if strings.HasPrefix(trimmed, "/") {
-		fields := strings.Fields(strings.TrimPrefix(trimmed, "/"))
-		if len(fields) > 0 {
-			names = append(names, trimInvocationPunctuation(fields[0]))
-		}
-	}
-	seen := map[string]struct{}{}
-	documents := make([]Document, 0, len(names))
-	for _, name := range names {
-		if _, duplicate := seen[name]; duplicate {
-			continue
-		}
-		seen[name] = struct{}{}
-		if _, found := c.entries[name]; !found {
-			continue
-		}
-		document, err := c.activate(ctx, name, true)
-		if err != nil {
-			return nil, err
-		}
-		documents = append(documents, document)
-	}
-	return documents, nil
-}
-
-func trimInvocationPunctuation(value string) string {
-	return strings.Trim(value, ".,;:!?，。；：！？")
 }
 
 // Render wraps activated content so compaction and downstream evaluators can

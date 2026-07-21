@@ -45,11 +45,12 @@ type Descriptor struct {
 }
 
 type Prepared struct {
-	Input        json.RawMessage
-	Action       policy.Action
-	TaskID       string
-	RunID        string
-	InvocationID string
+	Input               json.RawMessage
+	Action              policy.Action
+	TaskID              string
+	RunID               string
+	InvocationID        string
+	SourceInteractionID string
 }
 
 type Result struct {
@@ -182,6 +183,7 @@ type Request struct {
 	TaskID                    string
 	RunID                     string
 	InvocationID              string
+	SourceInteractionID       string
 	ToolCallID                string
 	BasisInputSequence        int64
 	BasisConversationSequence int64
@@ -338,6 +340,7 @@ func (g *Gateway) Invoke(ctx context.Context, request Request) (Outcome, error) 
 	if err != nil {
 		return Outcome{}, fmt.Errorf("validate %s input: %w", descriptor.ID, err)
 	}
+	prepared.SourceInteractionID = request.SourceInteractionID
 	if !allowsEffect(descriptor.AllowedEffects, prepared.Action.Effect) {
 		return Outcome{}, fmt.Errorf("tool %s does not declare effect %q", descriptor.ID, prepared.Action.Effect)
 	}

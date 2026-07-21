@@ -83,7 +83,7 @@ func TestInboundJoinsDispatchedAgentLoopAndFencesStaleEffects(t *testing.T) {
 	if err != nil || !claimed {
 		t.Fatalf("task=%+v claimed=%t err=%v", task, claimed, err)
 	}
-	if err := store.MarkInvocationDispatched(ctx, task.InvocationID); err != nil {
+	if err := store.MarkRunDispatched(ctx, task.RunID); err != nil {
 		t.Fatal(err)
 	}
 	second, err := store.CreateInbound(ctx, "web", testRef("second-input", "second-input-hash"), nil)
@@ -111,7 +111,7 @@ func TestInboundJoinsDispatchedAgentLoopAndFencesStaleEffects(t *testing.T) {
 		t.Fatalf("joined inputs = %+v", inputs)
 	}
 	staleCommit := agent.Commit{
-		TaskID: first.TaskID, RunID: task.RunID, InvocationID: task.InvocationID,
+		TaskID: first.TaskID, RunID: task.RunID,
 		ArtifactID: "stale-artifact", EvalID: "stale-eval", DeliveryID: "stale-delivery",
 		ArtifactKind: "text", ArtifactRef: testRef("stale-artifact-ref", "stale-artifact-hash"),
 		TraceRef: testRef("stale-trace", "stale-trace-hash"), EvalFindingsRef: testRef("stale-findings", "stale-findings-hash"),
@@ -129,7 +129,7 @@ func TestInboundJoinsDispatchedAgentLoopAndFencesStaleEffects(t *testing.T) {
 		t.Fatalf("stale progress commit error = %v", err)
 	}
 	staleIntent := tool.Intent{
-		ID: "stale-intent", TaskID: first.TaskID, RunID: task.RunID, InvocationID: task.InvocationID,
+		ID: "stale-intent", TaskID: first.TaskID, RunID: task.RunID, InvocationID: task.RunID,
 		ToolCallID: "call-1", BasisInputSequence: task.InputSequence, ToolID: "builtin.test", ToolVersion: "1",
 		Effect: policy.ReadOnly, Target: "local", ParametersHash: "hash", IdempotencyKey: "stale-intent-key",
 		Status: tool.IntentPlanned, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
@@ -154,7 +154,7 @@ func TestResumedOlderTaskCannotCaptureNewConversationBranch(t *testing.T) {
 	if err != nil || !claimed {
 		t.Fatalf("older task=%+v claimed=%t err=%v", older, claimed, err)
 	}
-	if err := store.MarkInvocationDispatched(ctx, older.InvocationID); err != nil {
+	if err := store.MarkRunDispatched(ctx, older.RunID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.db.ExecContext(ctx, `UPDATE tasks SET status = 'waiting' WHERE id = ?`, first.TaskID); err != nil {
@@ -181,7 +181,7 @@ func TestResumedOlderTaskCannotCaptureNewConversationBranch(t *testing.T) {
 		t.Fatalf("latest input joined non-dispatched newer task %q", newer.TaskID)
 	}
 	stale := agent.Commit{
-		TaskID: first.TaskID, RunID: older.RunID, InvocationID: older.InvocationID,
+		TaskID: first.TaskID, RunID: older.RunID,
 		ArtifactID: "older-artifact", EvalID: "older-eval", DeliveryID: "older-delivery",
 		ArtifactKind: "text", ArtifactRef: testRef("older-artifact-ref", "older-artifact-hash"),
 		TraceRef: testRef("older-trace", "older-trace-hash"), EvalFindingsRef: testRef("older-findings", "older-findings-hash"),
@@ -192,7 +192,7 @@ func TestResumedOlderTaskCannotCaptureNewConversationBranch(t *testing.T) {
 		t.Fatalf("older Conversation artifact commit error=%v", err)
 	}
 	staleIntent := tool.Intent{
-		ID: "older-intent", TaskID: first.TaskID, RunID: older.RunID, InvocationID: older.InvocationID,
+		ID: "older-intent", TaskID: first.TaskID, RunID: older.RunID, InvocationID: older.RunID,
 		ToolCallID: "call-older", BasisInputSequence: older.InputSequence,
 		BasisConversationSequence: older.ConversationSequence, ToolID: "builtin.test", ToolVersion: "1",
 		Effect: policy.ReadOnly, Target: "local", ParametersHash: "hash", IdempotencyKey: "older-intent-key",
@@ -220,7 +220,7 @@ func TestExplicitReplyTargetsRunningTaskBeforeConversationFrontier(t *testing.T)
 	if err != nil || !claimed {
 		t.Fatalf("older task=%+v claimed=%t err=%v", older, claimed, err)
 	}
-	if err := store.MarkInvocationDispatched(ctx, older.InvocationID); err != nil {
+	if err := store.MarkRunDispatched(ctx, older.RunID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.db.ExecContext(ctx, `UPDATE tasks SET status = 'waiting' WHERE id = ?`, first.TaskID); err != nil {
@@ -261,12 +261,12 @@ func TestPlanIntentReplaysDurableEffectAfterNewerInputButRejectsNewStaleEffect(t
 	if err != nil || !claimed {
 		t.Fatalf("task=%+v claimed=%t err=%v", task, claimed, err)
 	}
-	if err := store.MarkInvocationDispatched(ctx, task.InvocationID); err != nil {
+	if err := store.MarkRunDispatched(ctx, task.RunID); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
 	original := tool.Intent{
-		ID: "intent-original", TaskID: task.TaskID, RunID: task.RunID, InvocationID: task.InvocationID,
+		ID: "intent-original", TaskID: task.TaskID, RunID: task.RunID, InvocationID: task.RunID,
 		ToolCallID: "call-1", BasisInputSequence: task.InputSequence, ToolID: "builtin.test", ToolVersion: "1",
 		Effect: policy.ReadOnly, Target: "local", ParametersHash: "same-hash", IdempotencyKey: "same-key",
 		Control: policy.Auto, Status: tool.IntentPlanned, CreatedAt: now, UpdatedAt: now,
@@ -528,7 +528,7 @@ func TestContextCheckpointReplacesOnlyOlderConversationHistory(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT sequence FROM interactions WHERE id = ?`, second.InteractionID).Scan(&secondSequence); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SaveContextCheckpoint(ctx, first.TaskID, claimed.InvocationID, agent.ContextCheckpoint{
+	if err := store.SaveContextCheckpoint(ctx, first.TaskID, claimed.RunID, agent.ContextCheckpoint{
 		ID: "checkpoint", SummaryRef: testRef("context-summary", "hash-summary"),
 		FirstKeptSequence: secondSequence, SummarizedCount: 1, TokensBefore: 9000, TokensAfter: 3000,
 	}); err != nil {
@@ -550,6 +550,47 @@ func TestContextCheckpointReplacesOnlyOlderConversationHistory(t *testing.T) {
 	}
 	if loaded.Messages[1].ID != second.InteractionID || loaded.Messages[2].ID != third.InteractionID {
 		t.Fatalf("retained messages=%+v", loaded.Messages)
+	}
+}
+
+func TestClaimTaskExcludesHistoricalRuntimeCardsFromModelContext(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "eri.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	first, err := store.CreateInbound(ctx, "web", testRef("history-user", "history-user-hash"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE tasks SET status = 'completed' WHERE id = ?`, first.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	var conversationID string
+	if err := store.db.QueryRow(`SELECT conversation_id FROM tasks WHERE id = ?`, first.TaskID).Scan(&conversationID); err != nil {
+		t.Fatal(err)
+	}
+	now := formatTime(time.Now().UTC())
+	for _, record := range []struct{ id, kind string }{{"approval-card", "approval_request"}, {"runtime-card", "runtime_error"}} {
+		if _, err := store.db.Exec(`
+			INSERT INTO interactions(id, conversation_id, task_id, direction, role, kind, channel, content_ref_json, created_at)
+			VALUES(?, ?, ?, 'outbound', 'system', ?, 'web', '{}', ?)`, record.id, conversationID, first.TaskID, record.kind, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	second, err := store.CreateInbound(ctx, "web", testRef("current-user", "current-user-hash"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := store.ClaimTask(ctx, second.TaskID, "worker", time.Minute, "soul", `{}`, "test:model")
+	if err != nil || !ok {
+		t.Fatalf("claimed=%+v ok=%t err=%v", claimed, ok, err)
+	}
+	for _, message := range claimed.Messages {
+		if message.Kind == "approval_request" || message.Kind == "runtime_error" {
+			t.Fatalf("historical Runtime card entered model context: %+v", message)
+		}
 	}
 }
 
@@ -757,7 +798,7 @@ func TestFullUserDataErasureWaitsForFinalDeliveryThenWipesData(t *testing.T) {
 	if err != nil || !claimed {
 		t.Fatalf("task=%+v claimed=%v err=%v", task, claimed, err)
 	}
-	if err := store.MarkInvocationDispatched(ctx, task.InvocationID); err != nil {
+	if err := store.MarkRunDispatched(ctx, task.RunID); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
@@ -835,14 +876,14 @@ func TestReliableReplyTransactionFlowIsIdempotent(t *testing.T) {
 	if err != nil || !claimed {
 		t.Fatalf("task = %+v, claimed = %v, err = %v", task, claimed, err)
 	}
-	var invocationTarget string
-	if err := store.db.QueryRowContext(ctx, `SELECT target FROM invocations WHERE id = ?`, task.InvocationID).Scan(&invocationTarget); err != nil || invocationTarget != "test:model" {
-		t.Fatalf("invocation target=%q err=%v", invocationTarget, err)
+	var runTarget string
+	if err := store.db.QueryRowContext(ctx, `SELECT target FROM runs WHERE id = ?`, task.RunID).Scan(&runTarget); err != nil || runTarget != "test:model" {
+		t.Fatalf("run target=%q err=%v", runTarget, err)
 	}
 	if _, claimed, err := store.ClaimTask(ctx, sent.TaskID, "worker-b", time.Minute, "soul-v1", `{}`, "test:model"); err != nil || claimed {
 		t.Fatalf("second claim claimed = %v, err = %v", claimed, err)
 	}
-	if err := store.MarkInvocationDispatched(ctx, task.InvocationID); err != nil {
+	if err := store.MarkRunDispatched(ctx, task.RunID); err != nil {
 		t.Fatal(err)
 	}
 	commit := testCommit(task, testRef("reply", "hash-out"), eval.Pass)
@@ -885,14 +926,14 @@ func TestReliableReplyTransactionFlowIsIdempotent(t *testing.T) {
 	if len(events) < 8 {
 		t.Fatalf("event count = %d, want causal lifecycle", len(events))
 	}
-	var invocationUsage map[string]any
+	var runUsage map[string]any
 	for _, event := range events {
-		if event.Type == "invocation.succeeded" {
-			invocationUsage = event.Data
+		if event.Type == "run.succeeded" {
+			runUsage = event.Data
 		}
 	}
-	if invocationUsage["cache_hit_tokens"] != float64(240) || invocationUsage["cache_miss_tokens"] != float64(60) {
-		t.Fatalf("cache telemetry missing from invocation event: %+v", invocationUsage)
+	if runUsage["cache_hit_tokens"] != float64(240) || runUsage["cache_miss_tokens"] != float64(60) {
+		t.Fatalf("cache telemetry missing from run event: %+v", runUsage)
 	}
 }
 
@@ -919,7 +960,7 @@ func TestEvalAndDeliveryOutboxCommitAtomically(t *testing.T) {
 	if err != nil || !claimed {
 		t.Fatalf("claim err = %v", err)
 	}
-	if err := store.MarkInvocationDispatched(ctx, task.InvocationID); err != nil {
+	if err := store.MarkRunDispatched(ctx, task.RunID); err != nil {
 		t.Fatal(err)
 	}
 	invalid := testCommit(task, testRef("atomic-out", "hash-out"), eval.Result("not-valid"))
@@ -968,7 +1009,7 @@ func TestProgressDeliveryKeepsRunningTaskOpenAndDeduplicatesContent(t *testing.T
 	commit.ArtifactKind = "progress"
 	commit.EvalTier = "routine"
 	commit.EvalEvaluator = "llm_judge_progress"
-	created, err := store.CommitProgress(ctx, agent.ProgressCommit{Commit: commit, ModelTurnID: task.InvocationID + ":turn:1"})
+	created, err := store.CommitProgress(ctx, agent.ProgressCommit{Commit: commit, ModelTurnID: task.RunID + ":turn:1"})
 	if err != nil || !created {
 		t.Fatalf("commit progress created=%v err=%v", created, err)
 	}
@@ -1001,7 +1042,7 @@ func TestProgressDeliveryKeepsRunningTaskOpenAndDeduplicatesContent(t *testing.T
 	}
 	duplicate := commit
 	duplicate.ArtifactID, duplicate.EvalID, duplicate.DeliveryID = "duplicate-artifact", "duplicate-eval", "duplicate-delivery"
-	created, err = store.CommitProgress(ctx, agent.ProgressCommit{Commit: duplicate, ModelTurnID: task.InvocationID + ":turn:1"})
+	created, err = store.CommitProgress(ctx, agent.ProgressCommit{Commit: duplicate, ModelTurnID: task.RunID + ":turn:1"})
 	if err != nil || created {
 		t.Fatalf("duplicate progress created=%v err=%v", created, err)
 	}
@@ -1017,7 +1058,7 @@ func testRef(id, hash string) content.Ref {
 
 func testCommit(task agent.TaskContext, ref content.Ref, result eval.Result) agent.Commit {
 	return agent.Commit{
-		TaskID: task.TaskID, RunID: task.RunID, InvocationID: task.InvocationID,
+		TaskID: task.TaskID, RunID: task.RunID,
 		ArtifactID: "artifact-" + task.TaskID, EvalID: "eval-" + task.TaskID,
 		DeliveryID: "delivery-" + task.TaskID, ArtifactKind: "text", ArtifactRef: ref,
 		TraceRef:        testRef("trace-"+task.TaskID, "hash-trace"),

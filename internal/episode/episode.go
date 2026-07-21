@@ -20,7 +20,6 @@ type Manifest struct {
 	TaskID       string           `json:"task_id"`
 	Status       string           `json:"status"`
 	Runs         []map[string]any `json:"runs"`
-	Invocations  []map[string]any `json:"invocations"`
 	Artifacts    []map[string]any `json:"artifacts"`
 	Effects      []map[string]any `json:"effects"`
 	Events       []map[string]any `json:"events"`

@@ -27,9 +27,8 @@ type RunSummary struct {
 	Errors       int       `json:"errors"`
 }
 
-type Invocation struct {
+type ModelExecution struct {
 	ID              string                    `json:"id"`
-	Kind            string                    `json:"kind"`
 	Status          string                    `json:"status"`
 	Target          string                    `json:"target"`
 	ContextManifest execution.ContextManifest `json:"context_manifest"`
@@ -77,14 +76,14 @@ type Artifact struct {
 }
 
 type RunDetail struct {
-	Run         RunSummary       `json:"run"`
-	Invocations []Invocation     `json:"invocations"`
-	Effects     []Effect         `json:"effects"`
-	Artifacts   []Artifact       `json:"artifacts"`
-	Events      []eventlog.Event `json:"events"`
-	Spans       []RunSpan        `json:"spans"`
-	loopTrace   persistedRunTrace
-	activeTurn  *persistedActiveTurn
+	Run        RunSummary       `json:"run"`
+	Model      ModelExecution   `json:"model"`
+	Effects    []Effect         `json:"effects"`
+	Artifacts  []Artifact       `json:"artifacts"`
+	Events     []eventlog.Event `json:"events"`
+	Spans      []RunSpan        `json:"spans"`
+	loopTrace  persistedRunTrace
+	activeTurn *persistedActiveTurn
 }
 
 type Repository interface {

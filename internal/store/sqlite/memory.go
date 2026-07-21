@@ -545,8 +545,8 @@ func (s *Store) loadMemoryCandidate(ctx context.Context, memoryID string) (memor
 }
 
 func (s *Store) RecordMemoryRetrieval(ctx context.Context, record memory.RetrievalRecord) error {
-	if record.ID == "" || record.TaskID == "" || record.InvocationID == "" {
-		return fmt.Errorf("memory retrieval id, task id and invocation id are required")
+	if record.ID == "" || record.RunID == "" || record.SourceInteractionID == "" {
+		return fmt.Errorf("memory retrieval id, run id and source interaction id are required")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -554,9 +554,9 @@ func (s *Store) RecordMemoryRetrieval(ctx context.Context, record memory.Retriev
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO memory_retrievals(id, task_id, invocation_id, query_key, created_at)
+		INSERT INTO memory_retrievals(id, run_id, source_interaction_id, query_key, created_at)
 		VALUES(?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
-		record.ID, record.TaskID, record.InvocationID, record.QueryKey, formatTime(record.CreatedAt)); err != nil {
+		record.ID, record.RunID, record.SourceInteractionID, record.QueryKey, formatTime(record.CreatedAt)); err != nil {
 		return err
 	}
 	for _, item := range record.Items {
@@ -576,7 +576,7 @@ func (s *Store) RecordMemoryRetrieval(ctx context.Context, record memory.Retriev
 		}
 	}
 	if err := appendEvent(ctx, tx, "memory_retrieval", record.ID, "memory.recall.completed", map[string]any{
-		"task_id": record.TaskID, "invocation_id": record.InvocationID, "candidate_count": len(record.Items),
+		"run_id": record.RunID, "source_interaction_id": record.SourceInteractionID, "candidate_count": len(record.Items),
 	}, record.CreatedAt); err != nil {
 		return err
 	}
@@ -1021,7 +1021,7 @@ type memoryQueryer interface {
 }
 
 func tasksReferencingMemory(ctx context.Context, queryer memoryQueryer, memoryID string) ([]string, error) {
-	rows, err := queryer.QueryContext(ctx, `SELECT task_id, context_manifest_json FROM invocations`)
+	rows, err := queryer.QueryContext(ctx, `SELECT task_id, context_manifest_json FROM runs`)
 	if err != nil {
 		return nil, err
 	}

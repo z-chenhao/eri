@@ -79,9 +79,15 @@ type skillActivationModel struct {
 	calls int
 }
 
-type explicitSkillModel struct{ integrationModelCapabilities }
+type explicitSkillModel struct {
+	integrationModelCapabilities
+	mu    sync.Mutex
+	calls int
+}
 
-func (explicitSkillModel) Complete(_ context.Context, request agent.ModelRequest) (agent.ModelResponse, error) {
+func (m *explicitSkillModel) Complete(_ context.Context, request agent.ModelRequest) (agent.ModelResponse, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	usage := agent.Usage{Provider: "fake", Model: "explicit-skill", ModelCalls: 1}
 	if strings.Contains(request.System, "<eri_eval_judge>") {
 		last := request.Messages[len(request.Messages)-1].Content
@@ -90,16 +96,26 @@ func (explicitSkillModel) Complete(_ context.Context, request agent.ModelRequest
 		}
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: `{"result":"pass","tier":"routine","findings":[]}`}, FinishReason: "stop", Usage: usage}, nil
 	}
-	found := false
-	for _, message := range request.Messages {
-		if message.Role == "system" && strings.Contains(message.Content, "The user explicitly activated") && strings.Contains(message.Content, "Infer or establish purpose") {
-			found = true
+	m.calls++
+	switch m.calls {
+	case 1:
+		for _, message := range request.Messages {
+			if message.Role == "system" && strings.Contains(message.Content, "Infer or establish purpose") {
+				return agent.ModelResponse{}, fmt.Errorf("mentioned SKILL.md content was injected by Runtime")
+			}
 		}
+		return agent.ModelResponse{Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
+			ID: "load-writing", Name: "builtin_skills", Arguments: json.RawMessage(`{"operation":"load","name":"writing-delivery"}`),
+		}}}, FinishReason: "tool_calls", Usage: usage}, nil
+	case 2:
+		last := request.Messages[len(request.Messages)-1]
+		if last.Role != "tool" || last.ToolCallID != "load-writing" || !strings.Contains(last.Content, "Infer or establish purpose") {
+			return agent.ModelResponse{}, fmt.Errorf("writing skill body missing from Tool result: %+v", last)
+		}
+		return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: "This is a usable draft produced with the requested writing skill."}, FinishReason: "stop", Usage: usage}, nil
+	default:
+		return agent.ModelResponse{}, fmt.Errorf("unexpected mentioned skill call %d", m.calls)
 	}
-	if !found {
-		return agent.ModelResponse{}, fmt.Errorf("explicit SKILL.md content was not injected")
-	}
-	return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: "This is a usable draft produced with the requested writing skill."}, FinishReason: "stop", Usage: usage}, nil
 }
 
 func (m *skillActivationModel) Complete(_ context.Context, request agent.ModelRequest) (agent.ModelResponse, error) {
@@ -214,25 +230,25 @@ func TestDaemonModelActivatesStandardAgentSkillOnDemand(t *testing.T) {
 	if detail.Run.ModelCalls != 3 || len(detail.Effects) != 1 || detail.Effects[0].ToolID != "builtin.skills" || detail.Effects[0].Status != "confirmed" {
 		t.Fatalf("skill activation run = %+v", detail)
 	}
-	if len(detail.Invocations) != 1 {
-		t.Fatalf("invocations = %+v", detail.Invocations)
+	if detail.Model.ID == "" {
+		t.Fatalf("model execution = %+v", detail.Model)
 	}
-	activated := detail.Invocations[0].ContextManifest.SkillIDs
+	activated := detail.Model.ContextManifest.SkillIDs
 	if len(activated) != 1 || activated[0] != "research-decision" {
-		t.Fatalf("activated skills manifest = %+v", detail.Invocations[0].ContextManifest)
+		t.Fatalf("activated skills manifest = %+v", detail.Model.ContextManifest)
 	}
 }
 
-func TestDaemonUserCanExplicitlyActivateStandardAgentSkill(t *testing.T) {
-	d, client, stop := startEvalScenario(t, explicitSkillModel{}, nil, false, "")
+func TestDaemonMentionedSkillStillLoadsThroughOrdinaryTool(t *testing.T) {
+	d, client, stop := startEvalScenario(t, &explicitSkillModel{}, nil, false, "")
 	defer stop()
 	sent, timeline := sendEvalScenario(t, client, "Use $writing-delivery to turn these points into an email")
 	if len(timeline.Messages) != 2 || !strings.Contains(timeline.Messages[1].Content, "usable draft") {
 		t.Fatalf("unexpected delivered result: %+v", timeline.Messages)
 	}
 	detail := loadScenarioRun(t, d, sent.TaskID)
-	if detail.Run.ModelCalls != 2 || len(detail.Effects) != 0 {
-		t.Fatalf("explicit skill should not require a loader tool call: %+v", detail)
+	if detail.Run.ModelCalls != 3 || len(detail.Effects) != 1 || detail.Effects[0].ToolID != "builtin.skills" {
+		t.Fatalf("mentioned skill should use the ordinary loader Tool: %+v", detail)
 	}
 }
 

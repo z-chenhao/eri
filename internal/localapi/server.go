@@ -847,7 +847,7 @@ func (s *Server) systemOverview(w http.ResponseWriter, r *http.Request) {
 		if event.Type == "feedback.recorded" {
 			feedbackRecords++
 		}
-		if event.Type != "invocation.succeeded" && event.Type != "invocation.failed" {
+		if event.Type != "run.succeeded" && event.Type != "run.failed" {
 			continue
 		}
 		cacheHit += numberAsInt(event.Data["cache_hit_tokens"])

@@ -185,10 +185,10 @@ func (m *Memory) Execute(ctx context.Context, prepared tool.Prepared) (tool.Resu
 		output, err = m.service.Inspect(ctx, input.Limit)
 	case "record":
 		if input.SourceRef == "current_user_statement" {
-			if strings.TrimSpace(prepared.TaskID) == "" {
-				return tool.Result{}, fmt.Errorf("task id is required for explicit user memory provenance")
+			if strings.TrimSpace(prepared.SourceInteractionID) == "" {
+				return tool.Result{}, fmt.Errorf("source interaction id is required for explicit user memory provenance")
 			}
-			input.SourceRef = "task:" + prepared.TaskID
+			input.SourceRef = "interaction:" + prepared.SourceInteractionID
 		}
 		observedAt, parseErr := optionalTime(input.ObservedAt)
 		if parseErr != nil {

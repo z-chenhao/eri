@@ -80,7 +80,7 @@ func TestCommitmentFirePreservesCreatingLarkTarget(t *testing.T) {
 	}
 	now := formatTime(time.Now().UTC())
 	for _, statement := range []string{
-		`INSERT INTO runs(id, task_id, status, soul_version, started_at) VALUES('fire-run', '` + fireTaskID + `', 'active', 'soul', '` + now + `')`,
+		`INSERT INTO runs(id, task_id, status, model_status, soul_version, target, context_manifest_json, started_at, updated_at) VALUES('fire-run', '` + fireTaskID + `', 'active', 'dispatched', 'soul', 'test:model', '{}', '` + now + `', '` + now + `')`,
 		`UPDATE tasks SET status = 'waiting', terminal_status = 'completed', wait_reason = 'delivery' WHERE id = '` + fireTaskID + `'`,
 		`INSERT INTO artifacts(id, task_id, run_id, version, kind, content_ref_json, status, trace_ref_json, created_at)
 		 VALUES('fire-artifact', '` + fireTaskID + `', 'fire-run', 1, 'text', '{}', 'approved', '{}', '` + now + `')`,
@@ -240,7 +240,7 @@ func TestEriProposedCommitmentFireUsesLatestTrustedUserChannel(t *testing.T) {
 	}
 	now := formatTime(time.Now().UTC())
 	for _, statement := range []string{
-		`INSERT INTO runs(id, task_id, status, soul_version, started_at) VALUES('recent-run', '` + fireTaskID + `', 'active', 'soul', '` + now + `')`,
+		`INSERT INTO runs(id, task_id, status, model_status, soul_version, target, context_manifest_json, started_at, updated_at) VALUES('recent-run', '` + fireTaskID + `', 'active', 'dispatched', 'soul', 'test:model', '{}', '` + now + `', '` + now + `')`,
 		`INSERT INTO artifacts(id, task_id, run_id, version, kind, content_ref_json, status, trace_ref_json, created_at)
 		 VALUES('recent-artifact', '` + fireTaskID + `', 'recent-run', 1, 'text', '{}', 'approved', '{}', '` + now + `')`,
 		`INSERT INTO deliveries(id, task_id, artifact_id, target_channel, status, receipt, idempotency_key, terminal_status, created_at, updated_at)

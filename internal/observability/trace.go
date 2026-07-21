@@ -59,11 +59,12 @@ func (s *Service) buildRunSpans(ctx context.Context, detail RunDetail, exposure 
 		effectSpans[effect.ID] = RunSpan{ID: "effect:" + effect.ID}
 	}
 
-	for invocationIndex, invocation := range detail.Invocations {
-		contextID := "context:" + invocation.ID
-		memoryID := "memory:" + invocation.ID
-		loopID := "loop:" + invocation.ID
-		memoryRecord, err := s.memoryRetrieval(ctx, invocation.ContextManifest, exposure)
+	model := detail.Model
+	if model.ID != "" {
+		contextID := "context:" + model.ID
+		memoryID := "memory:" + model.ID
+		loopID := "loop:" + model.ID
+		memoryRecord, err := s.memoryRetrieval(ctx, model.ContextManifest, exposure)
 		if err != nil {
 			return nil, err
 		}
@@ -71,26 +72,26 @@ func (s *Service) buildRunSpans(ctx context.Context, detail RunDetail, exposure 
 			RunSpan{
 				ID: contextID, ParentID: startID, Kind: "context", Lane: "context", Title: "Assemble task context",
 				Description: "Load the Soul, conversation, active skills, and available tool schemas.", Status: "succeeded",
-				StartedAt: invocation.CreatedAt, DependsOn: []string{startID},
-				Metadata: safeContextMetadata(invocation.ContextManifest),
+				StartedAt: model.CreatedAt, DependsOn: []string{startID},
+				Metadata: safeContextMetadata(model.ContextManifest),
 			},
 			RunSpan{
 				ID: memoryID, ParentID: startID, Kind: "memory", Lane: "memory", Title: memorySpanTitle(memoryRecord),
 				Description: "Memory is retrieved independently before model input. Stored does not mean retrieved for this run.", Status: "succeeded",
-				StartedAt: invocation.CreatedAt, DependsOn: []string{startID}, Memory: &memoryRecord,
+				StartedAt: model.CreatedAt, DependsOn: []string{startID}, Memory: &memoryRecord,
 			},
 			RunSpan{
-				ID: loopID, ParentID: startID, Kind: "agent_loop", Lane: "agent", Title: invocationTitle(invocation),
-				Description: "Agent Loop is an inspectable execution boundary. It exposes control-flow facts without private reasoning.", Status: invocation.Status,
-				StartedAt: invocation.CreatedAt, EndedAt: invocation.UpdatedAt, DependsOn: []string{contextID, memoryID},
-				Metadata: safeInvocationMetadata(invocation),
+				ID: loopID, ParentID: startID, Kind: "agent_loop", Lane: "agent", Title: modelExecutionTitle(model),
+				Description: "Agent Loop is an inspectable execution boundary. It exposes control-flow facts without private reasoning.", Status: model.Status,
+				StartedAt: model.CreatedAt, EndedAt: model.UpdatedAt, DependsOn: []string{contextID, memoryID},
+				Metadata: safeModelExecutionMetadata(model),
 			},
 		)
-		trace := loopTraceForInvocation(detail, invocation, invocationIndex)
+		trace := loopTraceForModel(detail, model)
 		if trace.explicit {
 			loopSpanIndex := len(spans) - 1
 			spans[loopSpanIndex].Title = loopSummaryTitle(trace)
-			spans[loopSpanIndex].Metadata = loopSummaryMetadata(invocation, trace)
+			spans[loopSpanIndex].Metadata = loopSummaryMetadata(model, trace)
 			children, linked := buildLoopDetailSpans(loopID, contextID, memoryID, trace, detail.Effects)
 			spans = append(spans, children...)
 			for effectID, span := range linked {
@@ -219,20 +220,19 @@ type invocationLoopTrace struct {
 	explicit     bool
 }
 
-func loopTraceForInvocation(detail RunDetail, invocation Invocation, invocationIndex int) invocationLoopTrace {
+func loopTraceForModel(detail RunDetail, model ModelExecution) invocationLoopTrace {
 	if !detail.hasExplicitLoopTrace() {
 		return invocationLoopTrace{}
 	}
-	matchAll := len(detail.Invocations) == 1
 	result := invocationLoopTrace{runtimeStop: detail.loopTrace.RuntimeStop, failureCause: detail.loopTrace.FailureCause}
 	turnIDs := map[string]bool{}
 	for _, turn := range detail.loopTrace.ModelTurns {
-		if matchAll || strings.HasPrefix(turn.ID, invocation.ID+":turn:") {
+		if strings.HasPrefix(turn.ID, model.ID+":turn:") {
 			result.turns = append(result.turns, turn)
 			turnIDs[turn.ID] = true
 		}
 	}
-	if detail.activeTurn != nil && (matchAll || strings.HasPrefix(detail.activeTurn.ID, invocation.ID+":turn:")) {
+	if detail.activeTurn != nil && strings.HasPrefix(detail.activeTurn.ID, model.ID+":turn:") {
 		active := *detail.activeTurn
 		result.active = &active
 		turnIDs[active.ID] = true
@@ -253,7 +253,6 @@ func loopTraceForInvocation(detail RunDetail, invocation Invocation, invocationI
 		}
 	}
 	result.explicit = len(result.turns) > 0 || result.active != nil
-	_ = invocationIndex
 	return result
 }
 
@@ -280,8 +279,8 @@ func loopSummaryTitle(trace invocationLoopTrace) string {
 	return fmt.Sprintf("Agent Loop · %d Turns · %d Tools · %d Repair", turnCount, uniqueToolCallCount(trace.toolCalls), repairs)
 }
 
-func loopSummaryMetadata(invocation Invocation, trace invocationLoopTrace) map[string]any {
-	metadata := safeInvocationMetadata(invocation)
+func loopSummaryMetadata(model ModelExecution, trace invocationLoopTrace) map[string]any {
+	metadata := safeModelExecutionMetadata(model)
 	metadata["compound"] = true
 	metadata["focusable"] = true
 	metadata["turn_count"] = len(trace.turns)
@@ -620,19 +619,19 @@ func safeContextMetadata(manifest execution.ContextManifest) map[string]any {
 	}
 }
 
-func safeInvocationMetadata(invocation Invocation) map[string]any {
+func safeModelExecutionMetadata(model ModelExecution) map[string]any {
 	return map[string]any{
-		"invocation_id": invocation.ID,
-		"target":        invocation.Target,
-		"model_calls":   intValue(invocation.Usage["model_calls"]),
-		"input_tokens":  intValue(invocation.Usage["input_tokens"]),
-		"output_tokens": intValue(invocation.Usage["output_tokens"]),
-		"error_code":    invocation.ErrorCode,
+		"run_id":        model.ID,
+		"target":        model.Target,
+		"model_calls":   intValue(model.Usage["model_calls"]),
+		"input_tokens":  intValue(model.Usage["input_tokens"]),
+		"output_tokens": intValue(model.Usage["output_tokens"]),
+		"error_code":    model.ErrorCode,
 	}
 }
 
-func invocationTitle(invocation Invocation) string {
-	calls := intValue(invocation.Usage["model_calls"])
+func modelExecutionTitle(model ModelExecution) string {
+	calls := intValue(model.Usage["model_calls"])
 	if calls > 1 {
 		return fmt.Sprintf("Agent Loop · %d model calls", calls)
 	}

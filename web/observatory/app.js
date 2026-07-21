@@ -500,7 +500,7 @@
         event: null
       }));
     }
-    const invocationByID = new Map((detail.invocations || []).map((item) => [item.id, item]));
+	const model = detail.model || {};
     const effectByID = new Map((detail.effects || []).map((item) => [item.id, item]));
     const steps = [];
     const seen = new Set();
@@ -509,10 +509,9 @@
       if (['task.started', 'task.recovered', 'task.resumed'].includes(event.type) && !seen.has('start')) {
         seen.add('start');
         step = { kind: 'runtime', title: event.type === 'task.recovered' ? 'Recover run' : 'Start processing', status: 'succeeded' };
-      } else if (['invocation.dispatched', 'invocation.planned'].includes(event.type) && !seen.has('model')) {
+      } else if (['run.dispatched', 'run.planned'].includes(event.type) && !seen.has('model')) {
         seen.add('model');
-        const invocation = invocationByID.get(event.eriaggregateid);
-        step = { kind: 'model', title: 'Model processing', status: invocation?.status || 'running' };
+		step = { kind: 'model', title: 'Model processing', status: model.status || 'running' };
       } else if (event.type === 'effect.planned' && !seen.has(`effect:${event.eriaggregateid}`)) {
         seen.add(`effect:${event.eriaggregateid}`);
         const effect = effectByID.get(event.eriaggregateid);
