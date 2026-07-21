@@ -22,3 +22,17 @@ func TestIntervalRejectsRunawayFrequency(t *testing.T) {
 		t.Fatal("unsafe high-frequency commitment accepted")
 	}
 }
+
+func TestRelativeOneTimeScheduleUsesRuntimeClock(t *testing.T) {
+	now := time.Date(2026, 7, 21, 4, 0, 0, 123, time.UTC)
+	resolved, err := resolveSchedule(Schedule{Type: "once", AfterSeconds: 60}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.AfterSeconds != 0 || !resolved.At.Equal(now.Add(time.Minute)) {
+		t.Fatalf("resolved schedule = %+v", resolved)
+	}
+	if _, err := resolveSchedule(Schedule{Type: "once", At: now.Add(time.Hour), AfterSeconds: 60}, now); err == nil {
+		t.Fatal("ambiguous relative and absolute schedule accepted")
+	}
+}

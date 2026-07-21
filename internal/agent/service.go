@@ -510,23 +510,15 @@ func (s *Service) ProcessTask(ctx context.Context, taskID string) error {
 		}
 	}
 	descriptors := []tool.Descriptor{}
-	toolIDs := []string{}
 	if s.tools != nil {
 		descriptors = s.tools.Descriptors()
-		for _, descriptor := range descriptors {
-			toolIDs = append(toolIDs, descriptor.ID+"@"+descriptor.Version)
-		}
-	}
-	definitions, modelToolIDs, err := buildToolDefinitions(descriptors)
-	if err != nil {
-		return err
 	}
 	manifestValue := execution.ContextManifest{
 		IdentityID:       s.identity.ID,
 		SoulVersion:      s.identity.Version,
 		MemoryIDs:        []string{},
 		SkillIDs:         []string{},
-		ToolIDs:          toolIDs,
+		ToolIDs:          []string{},
 		ExternalDataSent: s.loop.ExternalModel,
 		ResponseProfile:  "soul_guided",
 	}
@@ -546,6 +538,16 @@ func (s *Service) ProcessTask(ctx context.Context, taskID string) error {
 		s.logger.Debug("task claim skipped", "component", "agent", "task_id", taskID)
 		return nil
 	}
+	descriptors = descriptorsForTask(descriptors, task.CurrentTask)
+	toolIDs := make([]string, 0, len(descriptors))
+	for _, descriptor := range descriptors {
+		toolIDs = append(toolIDs, descriptor.ID+"@"+descriptor.Version)
+	}
+	definitions, modelToolIDs, err := buildToolDefinitions(descriptors)
+	if err != nil {
+		return err
+	}
+	manifestValue.ToolIDs = toolIDs
 	observedAt := time.Now()
 	manifestValue.SourceChannel = task.SourceChannel
 	manifestValue.RuntimeObservedAt = observedAt.UTC()
@@ -668,6 +670,22 @@ func (s *Service) ProcessTask(ctx context.Context, taskID string) error {
 	err = s.continueLoop(ctx, task, request, modelToolIDs, state)
 	s.logger.Info("task processing finished", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "invocation_id", task.InvocationID, "duration_ms", time.Since(started).Milliseconds(), "error_code", observability.ErrorCode(err))
 	return err
+}
+
+// descriptorsForTask applies phase authority before Tool schemas enter model
+// context. A due commitment is already registered durable work, so its
+// fulfillment run cannot mutate the scheduler that caused it to exist.
+func descriptorsForTask(descriptors []tool.Descriptor, task execution.TaskCapsule) []tool.Descriptor {
+	if task.ExecutionPhase != execution.TaskPhaseFulfillment || task.TriggerEvent != execution.TriggerEventCommitmentDue {
+		return descriptors
+	}
+	filtered := make([]tool.Descriptor, 0, len(descriptors))
+	for _, descriptor := range descriptors {
+		if descriptor.ID != "builtin.commitments" {
+			filtered = append(filtered, descriptor)
+		}
+	}
+	return filtered
 }
 
 func (s *Service) resumeAgentCheckpoint(ctx context.Context, task TaskContext, currentToolIDs map[string]string) error {

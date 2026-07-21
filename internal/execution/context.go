@@ -8,6 +8,7 @@ import "time"
 const (
 	TriggerEventCommitmentDue = "commitment.due"
 	TriggerStateOccurred      = "occurred"
+	TaskPhaseFulfillment      = "fulfillment"
 )
 
 // ModelCapabilities are provider facts that affect safe request assembly.
@@ -61,6 +62,7 @@ type TaskCapsule struct {
 	TriggerChannel      string    `json:"trigger_channel"`
 	TriggerEvent        string    `json:"trigger_event,omitempty"`
 	TriggerState        string    `json:"trigger_state,omitempty"`
+	ExecutionPhase      string    `json:"execution_phase,omitempty"`
 	CommitmentID        string    `json:"commitment_id,omitempty"`
 	ScheduledFor        time.Time `json:"scheduled_for,omitempty"`
 }

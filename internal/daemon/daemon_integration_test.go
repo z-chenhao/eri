@@ -714,7 +714,7 @@ func (m *reminderBehaviorModel) Complete(_ context.Context, request agent.ModelR
 		}
 		arguments, err := json.Marshal(map[string]any{
 			"operation": "create", "message": "Check travel documents", "importance": "important",
-			"schedule": map[string]any{"type": "once", "at": m.at.Format(time.RFC3339Nano)},
+			"schedule": map[string]any{"type": "once", "after_seconds": 1},
 		})
 		if err != nil {
 			return agent.ModelResponse{}, err
@@ -733,11 +733,23 @@ func (m *reminderBehaviorModel) Complete(_ context.Context, request agent.ModelR
 	case 3:
 		foundTrigger := false
 		foundOccurredEventFrame := false
+		foundNotification := false
 		for _, message := range request.Messages {
 			foundTrigger = foundTrigger || strings.Contains(message.Content, "A durable commitment is due") && strings.Contains(message.Content, "Check travel documents")
 			foundOccurredEventFrame = foundOccurredEventFrame || strings.Contains(message.Content, `"trigger_event":"commitment.due"`) &&
 				strings.Contains(message.Content, `"trigger_state":"occurred"`) &&
-				strings.Contains(message.Content, "not unfinished work to replay")
+				strings.Contains(message.Content, `"execution_phase":"fulfillment"`) &&
+				strings.Contains(message.Content, "trigger registration is already complete")
+			if strings.Contains(message.Content, "Remind me later to check my travel documents") ||
+				strings.Contains(message.Content, "I will remind you to check your travel documents on time") {
+				return agent.ModelResponse{}, fmt.Errorf("fulfillment replayed registration conversation: %+v", request.Messages)
+			}
+		}
+		for _, definition := range request.Tools {
+			if definition.Name == "builtin_commitments" {
+				return agent.ModelResponse{}, fmt.Errorf("fulfillment exposed source scheduler capability")
+			}
+			foundNotification = foundNotification || definition.Name == "builtin_notification"
 		}
 		if !foundTrigger {
 			return agent.ModelResponse{}, fmt.Errorf("durable trigger context missing: %+v", request.Messages)
@@ -745,12 +757,27 @@ func (m *reminderBehaviorModel) Complete(_ context.Context, request agent.ModelR
 		if !foundOccurredEventFrame {
 			return agent.ModelResponse{}, fmt.Errorf("occurred event task frame missing: %+v", request.Messages)
 		}
+		if !foundNotification {
+			return agent.ModelResponse{}, fmt.Errorf("important reminder notification capability missing")
+		}
+		// Simulate a provider replaying the registration action despite the
+		// phase-scoped Tool surface. Runtime must reject it without an Effect.
+		return agent.ModelResponse{
+			Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
+				ID: "forbidden-commitment-call", Name: "builtin_commitments", Arguments: json.RawMessage(`{"operation":"create","message":"duplicate","schedule":{"type":"once","after_seconds":60}}`),
+			}}}, FinishReason: "tool_calls", Usage: agent.Usage{Provider: "fake", Model: "reminder", ModelCalls: 1},
+		}, nil
+	case 4:
+		last := request.Messages[len(request.Messages)-1]
+		if last.Role != "tool" || last.ToolCallID != "forbidden-commitment-call" || !strings.Contains(last.Content, "is not available") {
+			return agent.ModelResponse{}, fmt.Errorf("phase capability rejection missing: %+v", last)
+		}
 		return agent.ModelResponse{
 			Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
 				ID: "notification-call", Name: "builtin_notification", Arguments: json.RawMessage(`{"title":"Eri reminder","body":"It is time to check your travel documents"}`),
 			}}}, FinishReason: "tool_calls", Usage: agent.Usage{Provider: "fake", Model: "reminder", ModelCalls: 1},
 		}, nil
-	case 4:
+	case 5:
 		last := request.Messages[len(request.Messages)-1]
 		if last.Role != "tool" || last.ToolCallID != "notification-call" || !strings.Contains(last.Content, `"success":true`) {
 			return agent.ModelResponse{}, fmt.Errorf("notification result missing: %+v", last)
@@ -2041,7 +2068,7 @@ func TestDaemonCommitmentSurvivesRestartAndDeliversProactiveReminder(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(commitments) != 1 || commitments[0].Status != "completed" {
+	if len(commitments) != 1 || commitments[0].Status != "completed" || commitments[0].Schedule.AfterSeconds != 0 || commitments[0].Schedule.At.IsZero() {
 		t.Fatalf("event delivery replayed the historical scheduling request: %+v", commitments)
 	}
 	assertDataRootDoesNotContain(t, dataRoot, []byte("Check travel documents"))

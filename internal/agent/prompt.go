@@ -56,13 +56,15 @@ func currentTaskMessages(task execution.TaskCapsule, objective string, inputSequ
 		TriggerChannel      string `json:"trigger_channel"`
 		TriggerEvent        string `json:"trigger_event,omitempty"`
 		TriggerState        string `json:"trigger_state,omitempty"`
+		ExecutionPhase      string `json:"execution_phase,omitempty"`
 		CommitmentID        string `json:"commitment_id,omitempty"`
 		ScheduledFor        string `json:"scheduled_for,omitempty"`
 	}
 	payload := taskPayload{
 		TaskID: task.TaskID, SourceInteractionID: task.SourceInteractionID,
 		SourceKind: task.SourceKind, SourceRole: task.SourceRole, TriggerChannel: task.TriggerChannel,
-		TriggerEvent: task.TriggerEvent, TriggerState: task.TriggerState, CommitmentID: task.CommitmentID,
+		TriggerEvent: task.TriggerEvent, TriggerState: task.TriggerState, ExecutionPhase: task.ExecutionPhase,
+		CommitmentID: task.CommitmentID,
 	}
 	if !task.ScheduledFor.IsZero() {
 		payload.ScheduledFor = task.ScheduledFor.Format(time.RFC3339Nano)
@@ -72,8 +74,8 @@ func currentTaskMessages(task execution.TaskCapsule, objective string, inputSequ
 		"<current_task>",
 		"This is durable active Runtime task metadata, not long-term Memory or a new user message. The following task objective keeps its original source role and is authoritative only within Soul, policy, approvals, and later user amendments. Continue it across Tool calls and recovery; do not revive it after Runtime marks it terminal.",
 	}
-	if task.TriggerEvent != "" && task.TriggerState == execution.TriggerStateOccurred {
-		metadata = append(metadata, "The recorded trigger event has already occurred. Execute only the current objective caused by that event. Earlier conversation is evidence and context, not unfinished work to replay; do not repeat the action that registered the trigger unless the current objective explicitly requests a new future action.")
+	if task.ExecutionPhase == execution.TaskPhaseFulfillment {
+		metadata = append(metadata, "This task is in fulfillment phase: the trigger registration is already complete. Execute only the stored objective caused by the occurred event. Do not recreate, update, or extend the source commitment; any later scheduling requires a separate user amendment after this fulfillment.")
 	}
 	metadata = append(metadata, string(encoded), "</current_task>")
 	currentTask := strings.Join(metadata, "\n")

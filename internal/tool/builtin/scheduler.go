@@ -44,7 +44,7 @@ func NewScheduler(service SchedulerService) (*Scheduler, error) {
 
 func (s *Scheduler) Descriptor() tool.Descriptor {
 	return tool.Descriptor{
-		ID: "builtin.commitments", Version: "0.3.0",
+		ID: "builtin.commitments", Version: "0.4.0",
 		Purpose: "Create, update, inspect, pause, resume or cancel durable reminders and recurring commitments. A due commitment wakes the same Eri Agent Loop; do not create one unless the user has agreed to the ongoing work. When the user refines or corrects a commitment just created, update that commitment_id instead of creating an overlapping commitment. Use origin_channel when the user explicitly asks in the current conversation for a reminder. Use recent_channel for ongoing proactive work first proposed by Eri and then accepted by the user, so each future delivery follows the user's latest trusted conversation channel.",
 		InputSchema: map[string]any{
 			"type": "object",
@@ -62,6 +62,7 @@ func (s *Scheduler) Descriptor() tool.Descriptor {
 					"properties": map[string]any{
 						"type":             map[string]any{"type": "string", "enum": []string{"once", "interval", "daily"}},
 						"at":               map[string]any{"type": "string", "description": "RFC3339 timestamp for once"},
+						"after_seconds":    map[string]any{"type": "integer", "minimum": 1, "description": "Runtime-relative delay for once; prefer this for requests such as in one minute"},
 						"interval_seconds": map[string]any{"type": "integer", "minimum": 60},
 						"daily_time":       map[string]any{"type": "string", "description": "HH:MM"},
 						"timezone":         map[string]any{"type": "string", "description": "IANA timezone name"},

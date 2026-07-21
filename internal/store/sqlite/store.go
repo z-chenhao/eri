@@ -691,6 +691,7 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 	if currentTask.CommitmentID != "" {
 		currentTask.TriggerEvent = execution.TriggerEventCommitmentDue
 		currentTask.TriggerState = execution.TriggerStateOccurred
+		currentTask.ExecutionPhase = execution.TaskPhaseFulfillment
 	}
 	recovering := currentStatus == "running" && leaseUntil != "" && leaseUntil < formatTime(now)
 	if currentStatus != "queued" && !recovering {
@@ -757,27 +758,37 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 	}
 	firstSequence := int64(0)
 	var checkpointID, checkpointRefJSON string
-	err = tx.QueryRowContext(ctx, `
-		SELECT id, summary_ref_json, first_kept_sequence
-		FROM context_checkpoints ORDER BY created_at DESC LIMIT 1`).Scan(&checkpointID, &checkpointRefJSON, &firstSequence)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return agent.TaskContext{}, false, err
-	}
 	var reversed []agent.ContextRecord
-	if err == nil {
-		var checkpointRef content.Ref
-		if err := json.Unmarshal([]byte(checkpointRefJSON), &checkpointRef); err != nil {
+	if currentTask.ExecutionPhase != execution.TaskPhaseFulfillment {
+		err = tx.QueryRowContext(ctx, `
+			SELECT id, summary_ref_json, first_kept_sequence
+			FROM context_checkpoints ORDER BY created_at DESC LIMIT 1`).Scan(&checkpointID, &checkpointRefJSON, &firstSequence)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return agent.TaskContext{}, false, err
 		}
-		reversed = append(reversed, agent.ContextRecord{
-			ID: checkpointID, Kind: "context_checkpoint", Role: "system", ContentRef: checkpointRef,
-		})
+		if err == nil {
+			var checkpointRef content.Ref
+			if err := json.Unmarshal([]byte(checkpointRefJSON), &checkpointRef); err != nil {
+				return agent.TaskContext{}, false, err
+			}
+			reversed = append(reversed, agent.ContextRecord{
+				ID: checkpointID, Kind: "context_checkpoint", Role: "system", ContentRef: checkpointRef,
+			})
+		}
 	}
-	rows, err := tx.QueryContext(ctx, `
+	messageQuery := `
 		SELECT sequence, id, kind, role, content_ref_json FROM interactions
 		WHERE conversation_id = ? AND sequence >= ?
 			AND (kind != 'internal_trigger' OR id = (SELECT source_interaction_id FROM tasks WHERE id = ?))
-		ORDER BY sequence DESC`, channel.ConversationID, firstSequence, taskID)
+		ORDER BY sequence DESC`
+	messageArgs := []any{channel.ConversationID, firstSequence, taskID}
+	if currentTask.ExecutionPhase == execution.TaskPhaseFulfillment {
+		messageQuery = `
+			SELECT sequence, id, kind, role, content_ref_json FROM interactions
+			WHERE conversation_id = ? AND id = ? ORDER BY sequence DESC`
+		messageArgs = []any{channel.ConversationID, currentTask.SourceInteractionID}
+	}
+	rows, err := tx.QueryContext(ctx, messageQuery, messageArgs...)
 	if err != nil {
 		return agent.TaskContext{}, false, err
 	}
