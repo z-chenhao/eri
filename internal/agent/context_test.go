@@ -18,10 +18,13 @@ func TestRuntimeContextSuppliesCurrentTimeTimezoneAndChannel(t *testing.T) {
 	location := time.FixedZone("Asia/Shanghai", 8*60*60)
 	observed := time.Date(2026, time.July, 20, 9, 30, 0, 0, location)
 	context := runtimeContext("lark", observed)
-	for _, expected := range []string{"2026-07-20T09:30:00+08:00", "2026-07-20T01:30:00Z", "Asia/Shanghai", "Source channel: lark"} {
+	for _, expected := range []string{"Current local date: 2026-07-20", "Asia/Shanghai", "Source channel: lark", "do not infer a wall-clock time"} {
 		if !strings.Contains(context, expected) {
 			t.Fatalf("runtime context is missing %q: %s", expected, context)
 		}
+	}
+	if strings.Contains(context, "09:30:00") || strings.Contains(context, "01:30:00") {
+		t.Fatalf("runtime context contains cache-busting wall-clock precision: %s", context)
 	}
 }
 
@@ -72,7 +75,46 @@ func TestBuildMessagesSendsImagesOnlyToVisionCapableProvider(t *testing.T) {
 	}
 }
 
-type contextTestRepository struct{ checkpoint ContextCheckpoint }
+func TestCurrentTaskMessagesPreserveSchedulerProvenanceAndObjective(t *testing.T) {
+	scheduledFor := time.Date(2026, time.July, 21, 1, 0, 0, 0, time.UTC)
+	messages := currentTaskMessages(execution.TaskCapsule{
+		TaskID: "task-1", SourceInteractionID: "trigger-1", SourceKind: "internal_trigger",
+		SourceRole: "system", TriggerChannel: "scheduler", CommitmentID: "commitment-1",
+		ScheduledFor: scheduledFor,
+	}, "Check the monitored sources for material changes.", 42)
+	if len(messages) != 3 || messages[0].Role != "system" || messages[1].Role != "system" || messages[2].Role != "system" {
+		t.Fatalf("current task messages = %+v", messages)
+	}
+	for _, expected := range []string{"<current_task>", `"source_role":"system"`, `"trigger_channel":"scheduler"`, `"commitment_id":"commitment-1"`, "2026-07-21T01:00:00Z"} {
+		if !strings.Contains(messages[0].Content, expected) {
+			t.Fatalf("current task is missing %q: %s", expected, messages[0].Content)
+		}
+	}
+	if !strings.Contains(messages[1].Content, "<task_objective>") || !strings.Contains(messages[1].Content, "Check the monitored sources") {
+		t.Fatalf("task objective = %s", messages[1].Content)
+	}
+	if !strings.Contains(messages[2].Content, "<current_step>") || !strings.Contains(messages[2].Content, "input_sequence=42") {
+		t.Fatalf("current step = %s", messages[2].Content)
+	}
+}
+
+func TestCurrentTaskMessagesDoNotElevateUserObjectiveRole(t *testing.T) {
+	messages := currentTaskMessages(execution.TaskCapsule{
+		TaskID: "task-1", SourceInteractionID: "user-1", SourceKind: "text", SourceRole: "user", TriggerChannel: "web",
+	}, "Review this report.", 3)
+	if len(messages) != 3 || messages[1].Role != "user" || !strings.Contains(messages[1].Content, "Review this report") {
+		t.Fatalf("user task objective role was not preserved: %+v", messages)
+	}
+	if strings.Contains(messages[0].Content, "Review this report") {
+		t.Fatalf("user objective was copied into Runtime system metadata: %s", messages[0].Content)
+	}
+}
+
+type contextTestRepository struct {
+	checkpoint ContextCheckpoint
+	inputs     []ContextRecord
+	manifest   string
+}
 
 func (r *contextTestRepository) SaveContextCheckpoint(_ context.Context, _, _ string, checkpoint ContextCheckpoint) error {
 	r.checkpoint = checkpoint
@@ -126,6 +168,86 @@ func TestPersistentContextCompactionKeepsRecentTurnAndPersistsCheckpoint(t *test
 	}
 }
 
+func TestLoopCompactionRepinsDynamicAndCurrentTaskContext(t *testing.T) {
+	repository := &contextTestRepository{}
+	model := &contextTestModel{}
+	service := &Service{content: nil, model: model, logger: slog.Default()}
+	service.repository = contextRepositoryAdapter{contextTestRepository: repository}
+
+	messages := make([]Message, 0, 16)
+	for index := 0; index < 12; index++ {
+		role := "assistant"
+		if index%2 == 0 {
+			role = "user"
+		}
+		messages = append(messages, Message{Role: role, Content: strings.Repeat("historical execution evidence ", 180)})
+	}
+	messages = append(messages,
+		Message{Role: "system", Content: "<relevant_memory_context>\nselected durable preference\n</relevant_memory_context>"},
+		Message{Role: "system", Content: "<current_runtime_context>\nCurrent local date: 2026-07-21\n</current_runtime_context>"},
+	)
+	capsule := execution.TaskCapsule{TaskID: "task-1", SourceInteractionID: "source-1", SourceKind: "internal_trigger", SourceRole: "system", TriggerChannel: "scheduler"}
+	messages = append(messages, currentTaskMessages(capsule, "Check the monitored sources.", 7)...)
+	request := ModelRequest{System: "stable system", Messages: messages, MaxOutputTokens: 512}
+	state := loopState{ContextManifest: execution.ContextManifest{CurrentTask: &capsule}}
+	compacted, usage, err := service.compactLoopContext(context.Background(), TaskContext{
+		TaskID: "task-1", RunID: "run-1", InvocationID: "invocation-1", CurrentTask: capsule,
+	}, request, ModelCapabilities{Text: true, ContextTokens: 8_000, MaxOutputTokens: 2_048}, &state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.calls == 0 || usage.ModelCalls == 0 {
+		t.Fatalf("compactor calls=%d usage=%+v", model.calls, usage)
+	}
+	joined := ""
+	for _, message := range compacted.Messages {
+		joined += message.Content
+	}
+	for _, required := range []string{"selected durable preference", "Current local date: 2026-07-21", "<current_task>", "Check the monitored sources.", "<current_step>"} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("compacted context lost %q: %s", required, joined)
+		}
+	}
+	if last := compacted.Messages[len(compacted.Messages)-1]; !strings.HasPrefix(last.Content, "<current_step>") {
+		t.Fatalf("current step is not final after compaction: %+v", last)
+	}
+}
+
+func TestJoinedInputRefreshesCurrentStepWithoutReplacingTaskCapsule(t *testing.T) {
+	contentStore, err := content.New(t.TempDir(), []byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	joinedRef, err := contentStore.Put(context.Background(), []byte("Use the corrected scope."), content.Metadata{MediaType: "text/plain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsule := execution.TaskCapsule{TaskID: "task-1", SourceInteractionID: "source-1", SourceKind: "text", SourceRole: "user", TriggerChannel: "web"}
+	repository := &contextTestRepository{inputs: []ContextRecord{{ID: "joined-1", Kind: "text", Sequence: 2, Role: "user", ContentRef: joinedRef}}}
+	service := &Service{content: contentStore, logger: slog.Default()}
+	service.repository = contextRepositoryAdapter{contextTestRepository: repository}
+	request := ModelRequest{Messages: currentTaskMessages(capsule, "Review the report.", 1)}
+	state := loopState{InputSequence: 1, Capabilities: ModelCapabilities{ContextTokens: 8_000}, ContextManifest: execution.ContextManifest{CurrentTask: &capsule}}
+	changed, err := service.refreshTaskInputs(context.Background(), TaskContext{
+		TaskID: "task-1", RunID: "run-1", InvocationID: "invocation-1", CurrentTask: capsule,
+	}, &request, &state)
+	if err != nil || !changed {
+		t.Fatalf("refresh changed=%t err=%v", changed, err)
+	}
+	if state.InputSequence != 2 || state.TaskText != "Use the corrected scope." {
+		t.Fatalf("refreshed state sequence=%d task=%q", state.InputSequence, state.TaskText)
+	}
+	if len(request.Messages) != 5 || request.Messages[3].Role != "user" || request.Messages[3].Content != "Use the corrected scope." {
+		t.Fatalf("refreshed messages = %+v", request.Messages)
+	}
+	if last := request.Messages[len(request.Messages)-1]; last.Role != "system" || !strings.Contains(last.Content, "input_sequence=2") {
+		t.Fatalf("refreshed current step = %+v", last)
+	}
+	if err := validateModelTranscript(request.Messages); err != nil {
+		t.Fatalf("refreshed task transcript is invalid: %v", err)
+	}
+}
+
 // contextRepositoryAdapter supplies the main Repository methods without
 // weakening the production interface merely for this focused test.
 type contextRepositoryAdapter struct{ *contextTestRepository }
@@ -148,7 +270,9 @@ func (contextRepositoryAdapter) PauseForSubagent(context.Context, SubagentWaitCo
 func (contextRepositoryAdapter) ClaimSubagentResume(context.Context, string, string, time.Duration) (SubagentResume, bool, error) {
 	return SubagentResume{}, false, nil
 }
-func (contextRepositoryAdapter) UpdateInvocationContext(context.Context, string, string) error {
+
+func (r contextRepositoryAdapter) UpdateInvocationContext(_ context.Context, _ string, manifest string) error {
+	r.manifest = manifest
 	return nil
 }
 func (contextRepositoryAdapter) TaskCancelRequested(context.Context, string) (bool, error) {
@@ -160,6 +284,6 @@ func (contextRepositoryAdapter) CommitTaskCancellation(context.Context, string, 
 func (contextRepositoryAdapter) SaveAgentCheckpoint(context.Context, TaskContext, string, content.Ref) error {
 	return nil
 }
-func (contextRepositoryAdapter) LoadTaskInputsAfter(context.Context, string, int64) ([]ContextRecord, error) {
-	return nil, nil
+func (r contextRepositoryAdapter) LoadTaskInputsAfter(context.Context, string, int64) ([]ContextRecord, error) {
+	return append([]ContextRecord(nil), r.inputs...), nil
 }

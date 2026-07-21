@@ -332,9 +332,15 @@ func (attachmentIntegrationModel) Complete(_ context.Context, request agent.Mode
 	if len(request.Messages) == 0 {
 		return agent.ModelResponse{}, fmt.Errorf("attachment context is empty")
 	}
-	last := request.Messages[len(request.Messages)-1].Content
-	if !strings.Contains(last, `USER ATTACHMENT`) || !strings.Contains(last, `attachment-private-sigma`) || !strings.Contains(last, `notes.txt`) {
-		return agent.ModelResponse{}, fmt.Errorf("attachment was not assembled as untrusted context: %q", last)
+	attachmentContext := ""
+	for _, message := range request.Messages {
+		if message.Role == "user" && strings.Contains(message.Content, `USER ATTACHMENT`) {
+			attachmentContext = message.Content
+			break
+		}
+	}
+	if !strings.Contains(attachmentContext, `attachment-private-sigma`) || !strings.Contains(attachmentContext, `notes.txt`) {
+		return agent.ModelResponse{}, fmt.Errorf("attachment was not assembled as untrusted context: %q", attachmentContext)
 	}
 	return agent.ModelResponse{
 		Message: agent.Message{Role: "assistant", Content: "I read the attachment contents."}, FinishReason: "stop",
@@ -768,8 +774,17 @@ func (m *memoryBehaviorModel) Complete(_ context.Context, request agent.ModelReq
 		}
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: "I will remember that."}, FinishReason: "stop", Usage: agent.Usage{Provider: "fake", Model: "memory", ModelCalls: 1}}, nil
 	case 3:
-		if !strings.Contains(request.System, "The user prefers hotel rooms with a window") || !strings.Contains(request.System, "memory_id=") {
-			return agent.ModelResponse{}, fmt.Errorf("governed memory was not assembled: %s", request.System)
+		if strings.Contains(request.System, "The user prefers hotel rooms with a window") || strings.Contains(request.System, "memory_id=") {
+			return agent.ModelResponse{}, fmt.Errorf("governed memory invalidated the stable System prefix: %s", request.System)
+		}
+		dynamicContext := ""
+		for _, message := range request.Messages {
+			if message.Role == "system" && strings.Contains(message.Content, "<relevant_memory_context>") {
+				dynamicContext += message.Content
+			}
+		}
+		if !strings.Contains(dynamicContext, "The user prefers hotel rooms with a window") || !strings.Contains(dynamicContext, "memory_id=") {
+			return agent.ModelResponse{}, fmt.Errorf("governed memory was not assembled in the dynamic suffix: %s", dynamicContext)
 		}
 		return agent.ModelResponse{
 			Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
