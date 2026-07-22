@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -47,7 +48,7 @@ func TestJudgeRequiresDurableReceiptsForExplicitFeedback(t *testing.T) {
 
 func TestModelJudgeUsesTranscriptSkillsAndConfirmedTools(t *testing.T) {
 	model := judgeModelFunc(func(_ context.Context, request ModelRequest) (ModelResponse, error) {
-		if len(request.Tools) != 0 || !request.JSONOutput || !strings.Contains(request.System, "<eri_eval_judge>") {
+		if len(request.Tools) != 0 || !request.JSONOutput || !request.ReasoningDisabled || !strings.Contains(request.System, "<eri_eval_judge>") {
 			t.Fatalf("judge request can call tools or lacks rubric: %+v", request)
 		}
 		if !strings.Contains(request.System, "stable candidate context") || strings.Contains(request.System, "<agent_operating_rules>") {
@@ -141,7 +142,7 @@ func TestModelJudgeLetsTheModelRepairItsOwnInvalidProtocol(t *testing.T) {
 			return ModelResponse{Message: Message{Role: "assistant", Content: `{"result":"pass","tier":"substance","findings":[]}`}, Usage: Usage{ModelCalls: 1}}, nil
 		}
 		last := request.Messages[len(request.Messages)-1]
-		if last.Role != "assistant" || last.Content != "candidate" || !strings.Contains(request.System, "<judge_protocol_repair>") ||
+		if last.Role != "assistant" || last.Content != "candidate" || !request.JSONOutput || !request.ReasoningDisabled || !strings.Contains(request.System, "<judge_protocol_repair>") ||
 			!strings.Contains(request.System, "required response protocol") || strings.Contains(request.System, "map substance to substantive") {
 			t.Fatalf("generic Judge repair request = %+v", request)
 		}
@@ -150,6 +151,65 @@ func TestModelJudgeLetsTheModelRepairItsOwnInvalidProtocol(t *testing.T) {
 	decision, usage, err := judge.Evaluate(context.Background(), JudgeRequest{Messages: []Message{{Role: "assistant", Content: "candidate"}}})
 	if err != nil || decision.Result != "pass" || decision.Tier != "substantive" || calls != 2 || usage.ModelCalls != 2 {
 		t.Fatalf("decision=%+v usage=%+v calls=%d err=%v", decision, usage, calls, err)
+	}
+}
+
+func TestModelJudgeRetriesEmptyStructuredOutputWithoutNativeJSONMode(t *testing.T) {
+	calls := 0
+	initialSystem := ""
+	messages := []Message{
+		{Role: "user", Content: "record the inert marker"},
+		{Role: "assistant", ReasoningContent: "the governed tool is required", ToolCalls: []ToolCall{{ID: "call-1", Name: "record_marker", Arguments: []byte(`{}`)}}},
+		{Role: "tool", ToolCallID: "call-1", Content: `{"recorded":true}`},
+		{Role: "assistant", Content: "candidate"},
+	}
+	judge, _ := NewModelJudge(judgeModelFunc(func(_ context.Context, request ModelRequest) (ModelResponse, error) {
+		calls++
+		if !reflect.DeepEqual(request.Messages, messages) {
+			t.Fatalf("Judge attempt changed the authoritative Tool transcript:\n got: %+v\nwant: %+v", request.Messages, messages)
+		}
+		if calls == 1 {
+			if !request.JSONOutput || !request.ReasoningDisabled {
+				t.Fatal("first Judge attempt must request native structured output")
+			}
+			initialSystem = request.System
+			return ModelResponse{Message: Message{Role: "assistant", ReasoningContent: "private provider reasoning"}, Usage: Usage{ModelCalls: 1}}, nil
+		}
+		if request.JSONOutput || !request.ReasoningDisabled {
+			t.Fatal("empty native structured output must retry through the strict prompt protocol")
+		}
+		last := request.Messages[len(request.Messages)-1]
+		if last.Role != "assistant" || last.Content != "candidate" || request.System != initialSystem || strings.Contains(request.System, "<judge_protocol_repair>") {
+			t.Fatalf("Judge retry changed the authoritative transcript: %+v", request)
+		}
+		for _, message := range request.Messages {
+			if message.ReasoningContent == "private provider reasoning" {
+				t.Fatal("Judge retry reused provider-private reasoning from the rejected response")
+			}
+		}
+		return ModelResponse{Message: Message{Role: "assistant", Content: `{"result":"pass","tier":"routine","findings":[]}`}, Usage: Usage{ModelCalls: 1}}, nil
+	}))
+	decision, usage, err := judge.Evaluate(context.Background(), JudgeRequest{Messages: messages})
+	if err != nil || decision.Result != "pass" || calls != 2 || usage.ModelCalls != 2 {
+		t.Fatalf("decision=%+v usage=%+v calls=%d err=%v", decision, usage, calls, err)
+	}
+}
+
+func TestModelJudgeFailsClosedAfterEmptyOutputRecoveryIsExhausted(t *testing.T) {
+	calls := 0
+	judge, _ := NewModelJudge(judgeModelFunc(func(_ context.Context, request ModelRequest) (ModelResponse, error) {
+		calls++
+		if calls == 1 && !request.JSONOutput {
+			t.Fatal("first Judge attempt must request native structured output")
+		}
+		if calls > 1 && request.JSONOutput {
+			t.Fatal("empty structured output recovery must remain outside native JSON mode")
+		}
+		return ModelResponse{Message: Message{Role: "assistant"}, Usage: Usage{ModelCalls: 1}}, nil
+	}))
+	_, usage, err := judge.Evaluate(context.Background(), JudgeRequest{Messages: []Message{{Role: "assistant", Content: "candidate"}}})
+	if err == nil || !strings.Contains(err.Error(), "empty response") || calls != judgeProtocolAttempts || usage.ModelCalls != judgeProtocolAttempts {
+		t.Fatalf("usage=%+v calls=%d err=%v", usage, calls, err)
 	}
 }
 

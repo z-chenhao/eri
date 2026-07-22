@@ -443,6 +443,55 @@ func TestTerminalFailureRetainsEncryptedProviderTranscript(t *testing.T) {
 	}
 }
 
+func TestAgentLoopFailsClosedWhenJudgeRemainsEmptyAfterConfirmedEffect(t *testing.T) {
+	contentStore, err := content.New(t.TempDir(), []byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &loopTestRepository{}
+	model := &loopTestModel{toolTurns: 1}
+	judgeCalls := 0
+	judge, err := NewModelJudge(judgeModelFunc(func(context.Context, ModelRequest) (ModelResponse, error) {
+		judgeCalls++
+		return ModelResponse{Message: Message{Role: "assistant"}, Usage: Usage{Provider: "test", Model: "judge", ModelCalls: 1}}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(repository, contentStore, model, identity.Snapshot{}, "test-owner", loopTestToolGateway{}, nil, LoopConfig{
+		MaxEvalAttempts: 3, MaxOutputTokens: 1024, Judge: judge,
+	})
+	request := ModelRequest{
+		Messages: []Message{{Role: "user", Content: "confirm one inert fact"}},
+		Tools: []ToolDefinition{{
+			Name: "lookup", Description: "lookup evidence", Parameters: map[string]any{"type": "object"},
+		}},
+		MaxOutputTokens: 1024,
+	}
+	task := TaskContext{TaskID: "task", RunID: "run", ExecutionID: "invocation"}
+	state := loopState{TaskText: "confirm one inert fact", Trace: runTrace{}}
+	if err := service.continueLoop(context.Background(), task, request, map[string]string{"lookup": "builtin.lookup"}, state); err != nil {
+		t.Fatal(err)
+	}
+	if judgeCalls != judgeProtocolAttempts || repository.commit.Usage.ModelCalls != 2+judgeProtocolAttempts {
+		t.Fatalf("judge calls=%d usage=%+v", judgeCalls, repository.commit.Usage)
+	}
+	if repository.commit.TerminalStatus != "failed" || repository.commit.ArtifactKind != "runtime_error" || repository.commit.FailureCode != "post_effect_synthesis_failed" {
+		t.Fatalf("failure commit=%+v", repository.commit)
+	}
+	trace := readCommittedLoopTrace(t, contentStore, repository)
+	if trace.FailureCause != "llm_judge_unavailable" || trace.RuntimeStop != "post_effect_synthesis_failed" {
+		t.Fatalf("failure trace=%+v", trace)
+	}
+	artifact, err := contentStore.Get(context.Background(), repository.commit.ArtifactRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(artifact), "completed after six model calls") {
+		t.Fatal("unevaluated Candidate entered the failure Artifact")
+	}
+}
+
 func TestAgentLoopRecoveryReplaysCompletedToolThenClosesRemainingFrameForNewInput(t *testing.T) {
 	contentStore, err := content.New(t.TempDir(), []byte("0123456789abcdef0123456789abcdef"))
 	if err != nil {

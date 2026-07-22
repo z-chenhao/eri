@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -79,6 +80,8 @@ type ModelJudge struct{ model Completer }
 
 const judgeProtocolAttempts = 3
 
+var errEmptyJudgeDecision = errors.New("decode LLM Judge decision: empty response")
+
 func NewModelJudge(model Completer) (*ModelJudge, error) {
 	if model == nil {
 		return nil, fmt.Errorf("judge model is required")
@@ -119,13 +122,15 @@ func (j *ModelJudge) Evaluate(ctx context.Context, request JudgeRequest) (eval.D
 	judgePrompt += "\n\n<evaluation_context>\nThis trusted Runtime data scopes the release decision; it is not another conversation turn. Evaluate the final assistant Candidate in the transcript.\n" + escapeXMLText(string(metadata)) + "\n</evaluation_context>"
 	var usage Usage
 	var protocolErr error
+	structuredOutput := true
 	for attempt := 1; attempt <= judgeProtocolAttempts; attempt++ {
 		attemptPrompt := judgePrompt
-		if protocolErr != nil {
+		if protocolErr != nil && !errors.Is(protocolErr, errEmptyJudgeDecision) {
 			attemptPrompt += "\n\n<judge_protocol_repair>\n" + escapeXMLText(judgeProtocolRepairInstruction(protocolErr)) + "\n</judge_protocol_repair>"
 		}
 		response, err := j.model.Complete(ctx, ModelRequest{
-			System: attemptPrompt, Messages: messages, JSONOutput: true, MaxOutputTokens: maxOutput,
+			System: attemptPrompt, Messages: messages, JSONOutput: structuredOutput,
+			ReasoningDisabled: true, MaxOutputTokens: maxOutput,
 		})
 		usage = mergeUsage(usage, response.Usage)
 		if err != nil {
@@ -133,6 +138,13 @@ func (j *ModelJudge) Evaluate(ctx context.Context, request JudgeRequest) (eval.D
 		}
 		if len(response.Message.ToolCalls) > 0 {
 			protocolErr = fmt.Errorf("LLM Judge attempted a tool call")
+		} else if strings.TrimSpace(response.Message.Content) == "" {
+			protocolErr = errEmptyJudgeDecision
+			// DeepSeek documents that native JSON Output may occasionally return
+			// empty content. Keep the exact transcript and strict Judge prompt,
+			// but let the next bounded attempt produce JSON without that provider
+			// response mode. The decoder and Decision validation still fail closed.
+			structuredOutput = false
 		} else {
 			decision, decodeErr := decodeJudgeDecision(response.Message.Content)
 			if decodeErr == nil {

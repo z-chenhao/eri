@@ -197,11 +197,18 @@ func (c *Client) Complete(ctx context.Context, input agent.ModelRequest) (agent.
 	// transcript and sends it back on every later request that contains that
 	// assistant message, including after checkpoint recovery.
 	requestBody.Thinking = map[string]any{"type": "enabled"}
-	// DeepSeek accepts the OpenAI-compatible medium spelling but currently
-	// maps it to its lowest supported thinking tier, high. Keep the requested
-	// balanced wire value explicit rather than allowing Agent-like requests to
-	// be promoted automatically to max.
-	requestBody.ReasoningEffort = "medium"
+	if input.ReasoningDisabled {
+		requestBody.Thinking = map[string]any{"type": "disabled"}
+		if input.MaxOutputTokens > 0 {
+			requestBody.MaxTokens = &input.MaxOutputTokens
+		}
+	} else {
+		// DeepSeek accepts the OpenAI-compatible medium spelling but currently
+		// maps it to its lowest supported thinking tier, high. Keep the requested
+		// balanced wire value explicit rather than allowing Agent-like requests
+		// to be promoted automatically to max.
+		requestBody.ReasoningEffort = "medium"
+	}
 	encoded, err := json.Marshal(requestBody)
 	if err != nil {
 		return agent.ModelResponse{}, fmt.Errorf("encode DeepSeek request: %w", err)

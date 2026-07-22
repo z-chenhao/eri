@@ -61,7 +61,7 @@ func TestClientUsesNativeToolsAndParsesCacheUsage(t *testing.T) {
 	}
 }
 
-func TestClientUsesThinkingForToolFreeJudgment(t *testing.T) {
+func TestClientDisablesThinkingForStructuredEvaluation(t *testing.T) {
 	t.Parallel()
 	var observed chatRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -75,10 +75,12 @@ func TestClientUsesThinkingForToolFreeJudgment(t *testing.T) {
 	}))
 	defer server.Close()
 	client, _ := New(server.URL, "test-secret", "deepseek-v4-flash", time.Second)
-	if _, err := client.Complete(context.Background(), agent.ModelRequest{System: "judge carefully", JSONOutput: true, MaxOutputTokens: 128}); err != nil {
+	if _, err := client.Complete(context.Background(), agent.ModelRequest{
+		System: "judge carefully", JSONOutput: true, ReasoningDisabled: true, MaxOutputTokens: 128,
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if observed.Thinking["type"] != "enabled" || observed.ReasoningEffort != "medium" || observed.ToolChoice != "" || observed.Temperature != nil || observed.MaxTokens != nil || observed.ResponseFormat == nil || observed.ResponseFormat.Type != "json_object" {
+	if observed.Thinking["type"] != "disabled" || observed.ReasoningEffort != "" || observed.ToolChoice != "" || observed.Temperature != nil || observed.MaxTokens == nil || *observed.MaxTokens != 128 || observed.ResponseFormat == nil || observed.ResponseFormat.Type != "json_object" {
 		t.Fatalf("tool-free request = %+v", observed)
 	}
 }
@@ -106,12 +108,12 @@ func TestClientReplaysReasoningContentForToolHistoryWithoutCurrentTools(t *testi
 			{Role: "assistant", Content: "I found a reliable source and am checking one more detail."},
 			{Role: "user", Content: "evaluate the progress candidate"},
 		},
-		JSONOutput: true,
+		JSONOutput: true, ReasoningDisabled: true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if observed.Thinking["type"] != "enabled" || observed.ReasoningEffort != "medium" || observed.ToolChoice != "" || observed.Temperature != nil {
+	if observed.Thinking["type"] != "disabled" || observed.ReasoningEffort != "" || observed.ToolChoice != "" || observed.Temperature != nil {
 		t.Fatalf("historical tool request = %+v", observed)
 	}
 	if len(observed.Messages) < 3 || observed.Messages[2].ReasoningContent != "I need a governed lookup before judging the claim." {
@@ -448,5 +450,45 @@ func TestLiveThinkingToolReasoningReplay(t *testing.T) {
 	}
 	if _, err := client.Complete(context.Background(), request); err != nil {
 		t.Fatalf("replay reasoning_content with Tool result: %v", err)
+	}
+}
+
+func TestLiveStructuredJudgeAfterThinkingToolTranscript(t *testing.T) {
+	if os.Getenv("ERI_DEEPSEEK_LIVE_TEST") != "1" {
+		t.Skip("set ERI_DEEPSEEK_LIVE_TEST=1 for the bounded structured Judge probe")
+	}
+	t.Setenv("ERI_DEBUG_DEEPSEEK_REQUEST_BODY", "")
+	key := strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
+	if key == "" {
+		t.Fatal("DEEPSEEK_API_KEY is required for the live structured Judge probe")
+	}
+	model := strings.TrimSpace(os.Getenv("ERI_MODEL"))
+	if model == "" {
+		model = "deepseek-v4-flash"
+	}
+	client, err := New("https://api.deepseek.com", key, model, 90*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	judge, err := agent.NewModelJudge(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := []agent.Message{
+		{Role: "user", Content: "Record the inert marker with the governed tool."},
+		{Role: "assistant", Content: "", ReasoningContent: "The inert tool is required.", ToolCalls: []agent.ToolCall{{ID: "call-probe", Name: "record_marker", Arguments: json.RawMessage(`{}`)}}},
+		{Role: "tool", ToolCallID: "call-probe", Content: `{"success":true,"status":"confirmed","result":{"receipt":"probe-receipt","output":{"recorded":true}}}`},
+		{Role: "assistant", Content: "The inert marker was recorded."},
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		decision, usage, err := judge.Evaluate(context.Background(), agent.JudgeRequest{
+			Messages: messages, TaskText: "Record one inert marker", ConfirmedTools: []string{"builtin.record_marker"},
+		})
+		if err != nil {
+			t.Fatalf("structured Judge attempt %d: %v", attempt, err)
+		}
+		t.Logf("attempt=%d result=%s tier=%s model_calls=%d input_tokens=%d output_tokens=%d cache_hit=%d cache_miss=%d reasoning_tokens=%d",
+			attempt, decision.Result, decision.Tier, usage.ModelCalls, usage.InputTokens, usage.OutputTokens,
+			usage.CacheHitTokens, usage.CacheMissTokens, usage.ReasoningTokens)
 	}
 }
