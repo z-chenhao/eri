@@ -370,8 +370,8 @@ Before OS sandboxing exists, installed Plugins are explicitly trusted local code
 - Core supports local and cloud providers. The creator defaults to Ollama `qwen3.6:35b-a3b-q4_K_M`.
 - Ordinary configuration is one Provider and one model through first-run terminal setup; environment variables are development/deployment overrides only.
 - Insufficient capability causes explicit downgrade, alternative request, or stop—never false success.
-- DeepSeek usage, cache behavior, latency, and cost remain observable, but Eri does not send a model-output token ceiling or impose separate per-Task, daily, or monthly model-token ceilings. Provider context/account limits, deadlines, no-progress recovery, and explicit approval for materially costly external actions remain in force.
-- Eri requests DeepSeek reasoning with the wire label `medium`; DeepSeek currently maps that label to its effective `high` tier. The product does not claim that this spelling alone reduces reasoning depth or cost.
+- DeepSeek usage, cache behavior, latency, and cost remain observable. The Agent Loop does not receive a model-output token ceiling, and Eri does not impose separate per-Task, daily, or monthly model-token ceilings; bounded auxiliary protocols such as Eval may cap their small typed response. Provider context/account limits, deadlines, no-progress recovery, and explicit approval for materially costly external actions remain in force.
+- The Agent Loop requests DeepSeek reasoning with the wire label `medium`; DeepSeek currently maps that label to its effective `high` tier. The product does not claim that this spelling alone reduces reasoning depth or cost. The independent structured Judge disables provider reasoning, while still replaying provider-required historical Tool continuation state, so private reasoning never becomes an Eval result.
 - Background work prefers local models and respects device load, battery, and resources.
 
 ## 15. Multiple Agents
