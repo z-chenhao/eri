@@ -32,8 +32,8 @@ func TestJudgeTreatsFocusedClarificationAsDeliverable(t *testing.T) {
 
 func TestJudgeRequiresDurableReceiptsForExplicitFeedback(t *testing.T) {
 	for _, required := range []string{
-		"confirmed_tool_ids includes builtin.feedback",
-		"require builtin.memory too",
+		"confirmed_tools includes feedback",
+		"require memory too",
 		"A prose acknowledgment or promise is not a Receipt",
 		"never keyword matching",
 		"lack of inspection is not proof that an action did not occur",
@@ -53,10 +53,14 @@ func TestModelJudgeUsesTranscriptSkillsAndConfirmedTools(t *testing.T) {
 		if !strings.Contains(request.System, "stable candidate context") || strings.Contains(request.System, "<agent_operating_rules>") {
 			t.Fatalf("judge inherited the wrong system role: %s", request.System)
 		}
-		if len(request.Messages) != 3 || !strings.Contains(request.Messages[2].Content, `"selected_skills":["research-decision@1.0.0"]`) || !strings.Contains(request.Messages[2].Content, `"confirmed_tool_ids":["builtin.web"]`) {
-			t.Fatalf("judge context = %+v", request.Messages)
+		if len(request.Messages) != 2 || request.Messages[len(request.Messages)-1].Role != "assistant" ||
+			!strings.Contains(request.System, "research-decision@1.0.0") ||
+			!strings.Contains(request.System, "confirmed_tools") || !strings.Contains(request.System, "web") || strings.Contains(request.System, "builtin.web") ||
+			!strings.Contains(request.System, "memory_claim_ids") || !strings.Contains(request.System, "claim-preference") ||
+			!strings.Contains(request.System, "<evaluation_context>") {
+			t.Fatalf("judge context messages=%+v system=%s", request.Messages, request.System)
 		}
-		return ModelResponse{Message: Message{Role: "assistant", Content: `{"result":"repair","tier":"substantive","findings":["The recommendation is not grounded in the confirmed observation."]}`}, Usage: Usage{ModelCalls: 1}}, nil
+		return ModelResponse{Message: Message{Role: "assistant", Content: `{"result":"repair","tier":"substantive","findings":["The recommendation is not grounded in the confirmed observation."],"applied_memory_claims":["claim-preference"]}`}, Usage: Usage{ModelCalls: 1}}, nil
 	})
 	judge, err := NewModelJudge(model)
 	if err != nil {
@@ -64,9 +68,10 @@ func TestModelJudgeUsesTranscriptSkillsAndConfirmedTools(t *testing.T) {
 	}
 	decision, usage, err := judge.Evaluate(context.Background(), JudgeRequest{
 		CandidateContext: "stable candidate context", TaskText: "compare options", SkillIDs: []string{"research-decision@1.0.0"},
-		ConfirmedTools: []string{"builtin.web"}, Messages: []Message{{Role: "user", Content: "compare"}, {Role: "assistant", Content: "choose A"}},
+		ConfirmedTools: []string{"builtin.web"}, MemoryClaimIDs: []string{"claim-preference"},
+		Messages: []Message{{Role: "user", Content: "compare"}, {Role: "assistant", Content: "choose A"}},
 	})
-	if err != nil || decision.Result != "repair" || decision.Tier != "substantive" || len(decision.Findings) != 1 || usage.ModelCalls != 1 {
+	if err != nil || decision.Result != "repair" || decision.Tier != "substantive" || len(decision.Findings) != 1 || len(decision.AppliedMemoryClaims) != 1 || usage.ModelCalls != 1 {
 		t.Fatalf("decision=%+v usage=%+v err=%v", decision, usage, err)
 	}
 }
@@ -113,6 +118,7 @@ func TestModelJudgeFailsClosedOnInvalidProtocol(t *testing.T) {
 		{name: "unknown result", response: ModelResponse{Message: Message{Content: `{"result":"maybe","tier":"routine","findings":[]}`}}},
 		{name: "finding required", response: ModelResponse{Message: Message{Content: `{"result":"repair","tier":"routine","findings":[]}`}}},
 		{name: "pass contradicts finding", response: ModelResponse{Message: Message{Content: `{"result":"pass","tier":"routine","findings":["The claim is not confirmed by the Tool result."]}`}}},
+		{name: "unknown memory claim", response: ModelResponse{Message: Message{Content: `{"result":"pass","tier":"routine","findings":[],"applied_memory_claims":["claim-not-supplied"]}`}}},
 		{name: "tool call", response: ModelResponse{Message: Message{ToolCalls: []ToolCall{{ID: "x", Name: "builtin.web", Arguments: []byte(`{}`)}}}}},
 	}
 	for _, test := range tests {
@@ -135,8 +141,9 @@ func TestModelJudgeLetsTheModelRepairItsOwnInvalidProtocol(t *testing.T) {
 			return ModelResponse{Message: Message{Role: "assistant", Content: `{"result":"pass","tier":"substance","findings":[]}`}, Usage: Usage{ModelCalls: 1}}, nil
 		}
 		last := request.Messages[len(request.Messages)-1]
-		if last.Role != "user" || !strings.Contains(last.Content, "required response protocol") || strings.Contains(last.Content, "map substance to substantive") {
-			t.Fatalf("generic model repair instruction = %+v", last)
+		if last.Role != "assistant" || last.Content != "candidate" || !strings.Contains(request.System, "<judge_protocol_repair>") ||
+			!strings.Contains(request.System, "required response protocol") || strings.Contains(request.System, "map substance to substantive") {
+			t.Fatalf("generic Judge repair request = %+v", request)
 		}
 		return ModelResponse{Message: Message{Role: "assistant", Content: `{"result":"pass","tier":"substantive","findings":[]}`}, Usage: Usage{ModelCalls: 1}}, nil
 	}))
@@ -146,11 +153,11 @@ func TestModelJudgeLetsTheModelRepairItsOwnInvalidProtocol(t *testing.T) {
 	}
 }
 
-func TestModelJudgeRedactsProviderErrorDetailsAtCallerBoundary(t *testing.T) {
+func TestModelJudgeRejectsMissingCandidateBeforeCallingProvider(t *testing.T) {
 	judge, _ := NewModelJudge(judgeModelFunc(func(context.Context, ModelRequest) (ModelResponse, error) {
 		return ModelResponse{}, errors.New("provider unavailable")
 	}))
-	if _, _, err := judge.Evaluate(context.Background(), JudgeRequest{}); err == nil || !strings.Contains(err.Error(), "LLM Judge unavailable") {
+	if _, _, err := judge.Evaluate(context.Background(), JudgeRequest{}); err == nil || !strings.Contains(err.Error(), "final assistant Candidate") {
 		t.Fatalf("judge error = %v", err)
 	}
 }

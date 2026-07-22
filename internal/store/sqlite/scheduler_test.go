@@ -33,7 +33,7 @@ func TestCommitmentFirePreservesCreatingLarkTarget(t *testing.T) {
 	}
 	service := scheduler.NewService(store, contentStore)
 	commitment, err := service.Create(ctx, inbound.TaskID, scheduler.CreateRequest{
-		Message: "Go to the bathroom", Schedule: scheduler.Schedule{Type: "once", At: time.Now().UTC().Add(time.Minute)},
+		Task: "Remind the user to go to the bathroom", Schedule: scheduler.Schedule{Type: "once", At: time.Now().UTC().Add(time.Minute)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -41,9 +41,13 @@ func TestCommitmentFirePreservesCreatingLarkTarget(t *testing.T) {
 	if commitment.Target.Channel != "lark" || commitment.Target.ConversationID != "oc_owner_chat" || commitment.Target.ReplyToMessageID != "om_create_reminder" {
 		t.Fatalf("commitment target = %+v", commitment.Target)
 	}
-	if commitment.Target.RoutingMode != scheduler.DeliveryRouteOrigin {
-		t.Fatalf("commitment routing mode = %q", commitment.Target.RoutingMode)
+	if commitment.Target.RoutingMode != scheduler.DeliveryRouteOrigin || commitment.DeliveryRoute != scheduler.DeliveryRouteOrigin {
+		t.Fatalf("commitment routing mode target=%q model=%q", commitment.Target.RoutingMode, commitment.DeliveryRoute)
 	}
+	if commitment.Task != "Remind the user to go to the bathroom" {
+		t.Fatalf("model-facing commitment task = %q", commitment.Task)
+	}
+	commitTerminalSourceTask(t, store, inbound.TaskID, "lark")
 	triggered, err := store.TriggerDueCommitments(ctx, commitment.NextRunAt.Add(time.Second), 10)
 	if err != nil || triggered != 1 {
 		t.Fatalf("triggered=%d err=%v", triggered, err)
@@ -64,18 +68,18 @@ func TestCommitmentFirePreservesCreatingLarkTarget(t *testing.T) {
 		t.Fatalf("claim scheduled task claimed=%t err=%v", claimed, err)
 	}
 	if claimedTask.CurrentTask.TaskID != fireTaskID || claimedTask.CurrentTask.CommitmentID != commitment.ID ||
-		claimedTask.CurrentTask.SourceKind != "internal_trigger" || claimedTask.CurrentTask.SourceRole != "system" ||
+		claimedTask.CurrentTask.SourceKind != "internal_trigger" || claimedTask.CurrentTask.SourceRole != "user" ||
 		claimedTask.CurrentTask.TriggerChannel != "scheduler" || claimedTask.CurrentTask.TriggerEvent != "commitment.due" ||
 		claimedTask.CurrentTask.TriggerState != "occurred" || claimedTask.CurrentTask.ExecutionPhase != "fulfillment" ||
 		!claimedTask.CurrentTask.ScheduledFor.Equal(commitment.NextRunAt) {
 		t.Fatalf("scheduled task capsule = %+v", claimedTask.CurrentTask)
 	}
-	if len(claimedTask.Messages) != 1 || claimedTask.Messages[0].ID != claimedTask.CurrentTask.SourceInteractionID ||
-		claimedTask.Messages[0].Kind != "internal_trigger" {
-		t.Fatalf("fulfillment context replayed unrelated conversation: %+v", claimedTask.Messages)
+	if len(claimedTask.Messages) < 2 || claimedTask.Messages[len(claimedTask.Messages)-1].ID != claimedTask.CurrentTask.SourceInteractionID ||
+		claimedTask.Messages[len(claimedTask.Messages)-1].Kind != "internal_trigger" {
+		t.Fatalf("fulfillment context did not append to the canonical conversation: %+v", claimedTask.Messages)
 	}
 	objective, err := contentStore.Get(ctx, claimedTask.ObjectiveRef)
-	if err != nil || !bytes.Contains(objective, []byte("Go to the bathroom")) {
+	if err != nil || !bytes.Contains(objective, []byte("<system_reminder>")) || !bytes.Contains(objective, []byte("Remind the user to go to the bathroom")) {
 		t.Fatalf("scheduled task objective=%q err=%v", objective, err)
 	}
 	now := formatTime(time.Now().UTC())
@@ -129,6 +133,65 @@ func TestCommitmentFirePreservesCreatingLarkTarget(t *testing.T) {
 	}
 }
 
+func TestDueCommitmentWaitsForSourceDeliveryAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	databasePath := filepath.Join(root, "metadata", "eri.db")
+	store, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentStore, err := content.New(filepath.Join(root, "content"), bytes.Repeat([]byte{0x55}, 32))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	inbound, err := store.CreateInbound(ctx, "conversation_web", testRef("short-reminder-input", "short-reminder-input-hash"), nil)
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	service := scheduler.NewService(store, contentStore)
+	commitment, err := service.Create(ctx, inbound.TaskID, scheduler.CreateRequest{
+		Task: "Remind the user to read the book", Schedule: scheduler.Schedule{Type: "once", At: time.Now().UTC().Add(10 * time.Millisecond)},
+	})
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	due := commitment.NextRunAt.Add(time.Second)
+	if triggered, err := store.TriggerDueCommitments(ctx, due, 10); err != nil || triggered != 0 {
+		store.Close()
+		t.Fatalf("commitment fired before source delivery: triggered=%d err=%v", triggered, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	commitTerminalSourceTask(t, store, inbound.TaskID, "conversation_web")
+	if triggered, err := store.TriggerDueCommitments(ctx, due, 10); err != nil || triggered != 1 {
+		t.Fatalf("due commitment did not fire after source delivery: triggered=%d err=%v", triggered, err)
+	}
+	if triggered, err := store.TriggerDueCommitments(ctx, due, 10); err != nil || triggered != 0 {
+		t.Fatalf("commitment fire was not idempotent: triggered=%d err=%v", triggered, err)
+	}
+	var sourceTaskID, scheduledFor string
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT c.source_task_id, f.scheduled_for
+		FROM commitments c JOIN commitment_fires f ON f.commitment_id = c.id
+		WHERE c.id = ?`, commitment.ID).Scan(&sourceTaskID, &scheduledFor); err != nil {
+		t.Fatal(err)
+	}
+	if sourceTaskID != inbound.TaskID || scheduledFor != formatTime(commitment.NextRunAt) {
+		t.Fatalf("fire lineage source_task_id=%q scheduled_for=%q", sourceTaskID, scheduledFor)
+	}
+}
+
 func TestCommitmentUpdateReplacesScheduleWithoutOverlap(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -149,23 +212,25 @@ func TestCommitmentUpdateReplacesScheduleWithoutOverlap(t *testing.T) {
 	}
 	service := scheduler.NewService(store, contentStore)
 	original, err := service.Create(ctx, inbound.TaskID, scheduler.CreateRequest{
-		Message: "Check every minute", Schedule: scheduler.Schedule{Type: "interval", IntervalSeconds: 60},
+		Task: "Check every minute", Schedule: scheduler.Schedule{Type: "interval", IntervalSeconds: 60},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	commitTerminalSourceTask(t, store, inbound.TaskID, "lark")
 	clarification, err := store.CreateInbound(ctx, "conversation_web", testRef("monitor-clarification", "monitor-clarification-hash"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	updated, err := service.Update(ctx, clarification.TaskID, original.ID, scheduler.CreateRequest{
-		Message: "Check every hour with corrected scope", Schedule: scheduler.Schedule{Type: "interval", IntervalSeconds: 3600},
+		Task: "Check every hour with corrected scope", Schedule: scheduler.Schedule{Type: "interval", IntervalSeconds: 3600},
 		Importance: "normal", DeliveryRoute: scheduler.DeliveryRouteOrigin,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.ID != original.ID || updated.Version != 2 || updated.Schedule.IntervalSeconds != 3600 || !updated.NextRunAt.After(original.NextRunAt) {
+	if updated.ID != original.ID || updated.SourceTaskID != clarification.TaskID || updated.Version != 2 ||
+		updated.Schedule.IntervalSeconds != 3600 || !updated.NextRunAt.After(original.NextRunAt) || updated.Task != "Check every hour with corrected scope" || updated.DeliveryRoute != scheduler.DeliveryRouteOrigin {
 		t.Fatalf("updated commitment = %+v, original = %+v", updated, original)
 	}
 	if updated.Target.Channel != "lark" || updated.Target.ConversationID != "oc_owner_chat" || updated.Target.ReplyToMessageID != "om_create_monitor" {
@@ -175,18 +240,25 @@ func TestCommitmentUpdateReplacesScheduleWithoutOverlap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed) != 1 || listed[0].ID != original.ID || listed[0].Version != 2 || listed[0].Schedule.IntervalSeconds != 3600 {
+	if len(listed) != 1 || listed[0].ID != original.ID || listed[0].Version != 2 || listed[0].Schedule.IntervalSeconds != 3600 || listed[0].Task != "Check every hour with corrected scope" || listed[0].DeliveryRoute != scheduler.DeliveryRouteOrigin {
 		t.Fatalf("listed commitments = %+v", listed)
 	}
 	if triggered, err := store.TriggerDueCommitments(ctx, original.NextRunAt.Add(time.Second), 10); err != nil || triggered != 0 {
 		t.Fatalf("old schedule still fired: triggered=%d err=%v", triggered, err)
 	}
-	prompt, err := contentStore.Get(ctx, updated.MessageRef)
+	prompt, err := contentStore.Get(ctx, updated.TaskRef)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(prompt, []byte("corrected scope")) || bytes.Contains(prompt, []byte("unrelated earlier conversation")) {
 		t.Fatalf("updated prompt = %q", prompt)
+	}
+	if triggered, err := store.TriggerDueCommitments(ctx, updated.NextRunAt.Add(time.Second), 10); err != nil || triggered != 0 {
+		t.Fatalf("updated schedule fired before updating Task delivery: triggered=%d err=%v", triggered, err)
+	}
+	commitTerminalSourceTask(t, store, clarification.TaskID, "conversation_web")
+	if triggered, err := store.TriggerDueCommitments(ctx, updated.NextRunAt.Add(time.Second), 10); err != nil || triggered != 1 {
+		t.Fatalf("updated schedule did not fire after updating Task delivery: triggered=%d err=%v", triggered, err)
 	}
 }
 
@@ -209,7 +281,7 @@ func TestEriProposedCommitmentFireUsesLatestTrustedUserChannel(t *testing.T) {
 	}
 	service := scheduler.NewService(store, contentStore)
 	commitment, err := service.Create(ctx, origin.TaskID, scheduler.CreateRequest{
-		Message: "Review material AI developments", Schedule: scheduler.Schedule{Type: "once", At: createdAt.Add(time.Minute)},
+		Task: "Review material AI developments", Schedule: scheduler.Schedule{Type: "once", At: createdAt.Add(time.Minute)},
 		DeliveryRoute: scheduler.DeliveryRouteRecent,
 	})
 	if err != nil {
@@ -223,6 +295,7 @@ func TestEriProposedCommitmentFireUsesLatestTrustedUserChannel(t *testing.T) {
 	}, testRef("latest-lark", "latest-lark-hash"), nil); err != nil {
 		t.Fatal(err)
 	}
+	commitTerminalSourceTask(t, store, origin.TaskID, "conversation_web")
 	triggered, err := store.TriggerDueCommitments(ctx, commitment.NextRunAt.Add(time.Second), 10)
 	if err != nil || triggered != 1 {
 		t.Fatalf("triggered=%d err=%v", triggered, err)
@@ -280,7 +353,7 @@ func TestEriProposedCommitmentCanFollowLatestUserBackToWeb(t *testing.T) {
 	}
 	service := scheduler.NewService(store, contentStore)
 	commitment, err := service.Create(ctx, origin.TaskID, scheduler.CreateRequest{
-		Message: "Review material AI developments", Schedule: scheduler.Schedule{Type: "once", At: createdAt.Add(time.Minute)},
+		Task: "Review material AI developments", Schedule: scheduler.Schedule{Type: "once", At: createdAt.Add(time.Minute)},
 		DeliveryRoute: scheduler.DeliveryRouteRecent,
 	})
 	if err != nil {
@@ -289,6 +362,7 @@ func TestEriProposedCommitmentCanFollowLatestUserBackToWeb(t *testing.T) {
 	if _, err := store.CreateInbound(ctx, "conversation_web", testRef("latest-web", "latest-web-hash"), nil); err != nil {
 		t.Fatal(err)
 	}
+	commitTerminalSourceTask(t, store, origin.TaskID, "lark")
 	if triggered, err := store.TriggerDueCommitments(ctx, commitment.NextRunAt.Add(time.Second), 10); err != nil || triggered != 1 {
 		t.Fatalf("triggered=%d err=%v", triggered, err)
 	}
@@ -302,5 +376,32 @@ func TestEriProposedCommitmentCanFollowLatestUserBackToWeb(t *testing.T) {
 	}
 	if sourceChannel != "conversation_web" || fireChannel != "conversation_web" || conversationID != "" || replyToMessageID != "" || routingMode != scheduler.DeliveryRouteRecent {
 		t.Fatalf("web fire route source=%q target=%q conversation=%q reply=%q mode=%q", sourceChannel, fireChannel, conversationID, replyToMessageID, routingMode)
+	}
+}
+
+func commitTerminalSourceTask(t *testing.T, store *Store, taskID, targetChannel string) {
+	t.Helper()
+	ctx := context.Background()
+	now := formatTime(time.Now().UTC())
+	runID := taskID + "-terminal-run"
+	artifactID := taskID + "-terminal-artifact"
+	deliveryID := taskID + "-terminal-delivery"
+	for _, statement := range []string{
+		`INSERT INTO runs(id, task_id, status, model_status, soul_version, target, context_manifest_json, started_at, updated_at)
+		 VALUES('` + runID + `', '` + taskID + `', 'active', 'succeeded', 'soul', 'test:model', '{}', '` + now + `', '` + now + `')`,
+		`UPDATE tasks SET status = 'waiting', terminal_status = 'completed', wait_reason = 'delivery' WHERE id = '` + taskID + `'`,
+		`INSERT INTO artifacts(id, task_id, run_id, version, kind, content_ref_json, status, trace_ref_json, created_at)
+		 VALUES('` + artifactID + `', '` + taskID + `', '` + runID + `', 1, 'text', '{}', 'approved', '{}', '` + now + `')`,
+		`INSERT INTO deliveries(id, task_id, artifact_id, target_channel, status, receipt, idempotency_key, terminal_status, created_at, updated_at)
+		 VALUES('` + deliveryID + `', '` + taskID + `', '` + artifactID + `', '` + targetChannel + `', 'queued', '', '` + artifactID + `:` + targetChannel + `', 'completed', '` + now + `', '` + now + `')`,
+	} {
+		if _, err := store.db.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.CommitConversationDelivery(ctx, deliveryID, taskID+"-terminal-interaction", delivery.Receipt{
+		Level: "accepted_by_test",
+	}, time.Now().UTC()); err != nil {
+		t.Fatalf("commit source delivery: %v", err)
 	}
 }

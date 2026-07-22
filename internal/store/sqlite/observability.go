@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/z-chenhao/eri/internal/content"
@@ -86,10 +87,20 @@ func (s *Store) LoadRun(ctx context.Context, id string) (observability.RunDetail
 	if err := json.Unmarshal([]byte(contextJSON), &model.ContextManifest); err != nil {
 		return observability.RunDetail{}, false, fmt.Errorf("decode run %s context manifest: %w", model.ID, err)
 	}
+	retrievalIDs := append([]string(nil), model.ContextManifest.MemoryToolRetrievalIDs...)
 	if model.ContextManifest.MemoryRetrievalID != "" {
+		retrievalIDs = append(retrievalIDs, model.ContextManifest.MemoryRetrievalID)
+	}
+	for _, binding := range model.ContextManifest.MemoryBindings {
+		retrievalIDs = append(retrievalIDs, binding.RetrievalID)
+	}
+	sort.Strings(retrievalIDs)
+	retrievalIDs = compactStrings(retrievalIDs)
+	applied := make(map[string]struct{})
+	for _, retrievalID := range retrievalIDs {
 		usedRows, err := s.db.QueryContext(ctx, `
 				SELECT memory_id FROM memory_retrieval_items
-			WHERE retrieval_id = ? AND used = 1 ORDER BY rank`, model.ContextManifest.MemoryRetrievalID)
+			WHERE retrieval_id = ? AND used = 1 ORDER BY rank`, retrievalID)
 		if err != nil {
 			return observability.RunDetail{}, false, err
 		}
@@ -99,7 +110,10 @@ func (s *Store) LoadRun(ctx context.Context, id string) (observability.RunDetail
 				usedRows.Close()
 				return observability.RunDetail{}, false, err
 			}
-			model.ContextManifest.AppliedMemoryIDs = append(model.ContextManifest.AppliedMemoryIDs, memoryID)
+			if _, exists := applied[memoryID]; !exists {
+				applied[memoryID] = struct{}{}
+				model.ContextManifest.AppliedMemoryIDs = append(model.ContextManifest.AppliedMemoryIDs, memoryID)
+			}
 		}
 		if err := usedRows.Close(); err != nil {
 			return observability.RunDetail{}, false, err

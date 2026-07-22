@@ -5,6 +5,7 @@ package scheduler
 
 import (
 	"context"
+	"encoding/xml"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -26,15 +27,17 @@ type Schedule struct {
 }
 
 type CreateRequest struct {
-	Message       string   `json:"message"`
+	Task          string   `json:"task"`
 	Schedule      Schedule `json:"schedule"`
 	Importance    string   `json:"importance,omitempty"`
 	DeliveryRoute string   `json:"delivery_route,omitempty"`
 }
 
 const (
-	DeliveryRouteOrigin = "origin_channel"
-	DeliveryRouteRecent = "recent_channel"
+	DeliveryRouteOrigin    = "origin_channel"
+	DeliveryRouteRecent    = "recent_channel"
+	maxCommitmentTaskBytes = 16 * 1024
+	maxListedCommitments   = 20
 )
 
 // DeliveryTarget is a Runtime-owned routing fact. The model may request how a
@@ -48,17 +51,22 @@ type DeliveryTarget struct {
 }
 
 type Commitment struct {
-	ID         string         `json:"id"`
-	MessageRef content.Ref    `json:"-"`
-	Schedule   Schedule       `json:"schedule"`
-	Importance string         `json:"importance"`
-	Target     DeliveryTarget `json:"-"`
-	Status     string         `json:"status"`
-	NextRunAt  time.Time      `json:"next_run_at"`
-	LastRunAt  time.Time      `json:"last_run_at,omitempty"`
-	Version    int            `json:"version"`
-	CreatedAt  time.Time      `json:"created_at"`
-	UpdatedAt  time.Time      `json:"updated_at"`
+	ID           string      `json:"id"`
+	SourceTaskID string      `json:"-"`
+	TaskRef      content.Ref `json:"-"`
+	// Task is the decrypted model-facing assignment. It is populated only at
+	// the Service boundary and is never stored in SQLite or routing metadata.
+	Task          string         `json:"task"`
+	Schedule      Schedule       `json:"schedule"`
+	Importance    string         `json:"importance"`
+	DeliveryRoute string         `json:"delivery_route"`
+	Target        DeliveryTarget `json:"-"`
+	Status        string         `json:"status"`
+	NextRunAt     time.Time      `json:"next_run_at"`
+	LastRunAt     time.Time      `json:"last_run_at,omitempty"`
+	Version       int            `json:"version"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
 }
 
 type Repository interface {
@@ -72,6 +80,7 @@ type Repository interface {
 
 type ContentStore interface {
 	Put(context.Context, []byte, content.Metadata) (content.Ref, error)
+	Get(context.Context, content.Ref) ([]byte, error)
 	Delete(context.Context, content.Ref) error
 }
 
@@ -107,13 +116,13 @@ func (s *Service) Create(ctx context.Context, sourceTaskID string, request Creat
 	if err != nil {
 		return Commitment{}, err
 	}
-	ref, err := s.storePrompt(ctx, id, request)
+	ref, err := s.storeReminder(ctx, id, request)
 	if err != nil {
 		return Commitment{}, err
 	}
 	commitment := Commitment{
-		ID: id, MessageRef: ref, Schedule: request.Schedule, Importance: request.Importance,
-		Target: target,
+		ID: id, SourceTaskID: sourceTaskID, TaskRef: ref, Task: request.Task, Schedule: request.Schedule, Importance: request.Importance,
+		DeliveryRoute: target.RoutingMode, Target: target,
 		Status: "active", NextRunAt: next, Version: 1, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := s.repository.CreateCommitment(ctx, commitment); err != nil {
@@ -144,18 +153,20 @@ func (s *Service) Update(ctx context.Context, sourceTaskID, id string, request C
 	if err != nil {
 		return Commitment{}, err
 	}
-	ref, err := s.storePrompt(ctx, id, request)
+	ref, err := s.storeReminder(ctx, id, request)
 	if err != nil {
 		return Commitment{}, err
 	}
 	updated, err := s.repository.UpdateCommitment(ctx, Commitment{
-		ID: id, MessageRef: ref, Schedule: request.Schedule, Importance: request.Importance,
+		ID: id, SourceTaskID: sourceTaskID, TaskRef: ref, Schedule: request.Schedule, Importance: request.Importance,
 		Target: DeliveryTarget{RoutingMode: request.DeliveryRoute}, NextRunAt: next, UpdatedAt: now,
 	})
 	if err != nil {
 		_ = s.content.Delete(context.Background(), ref)
 		return Commitment{}, err
 	}
+	updated.Task = request.Task
+	updated.DeliveryRoute = updated.Target.RoutingMode
 	return updated, nil
 }
 
@@ -182,9 +193,9 @@ func normalizeRequest(sourceTaskID string, request CreateRequest) (CreateRequest
 	if sourceTaskID == "" {
 		return CreateRequest{}, fmt.Errorf("commitment source task id is required")
 	}
-	request.Message = strings.TrimSpace(request.Message)
-	if request.Message == "" || len([]byte(request.Message)) > 64*1024 {
-		return CreateRequest{}, fmt.Errorf("commitment message must be between 1 byte and 64 KiB")
+	request.Task = strings.TrimSpace(request.Task)
+	if request.Task == "" || len([]byte(request.Task)) > maxCommitmentTaskBytes {
+		return CreateRequest{}, fmt.Errorf("commitment task must be between 1 byte and 16 KiB")
 	}
 	if request.Importance == "" {
 		request.Importance = "normal"
@@ -210,22 +221,53 @@ func (s *Service) deliveryTarget(ctx context.Context, sourceTaskID, deliveryRout
 	return target, nil
 }
 
-func (s *Service) storePrompt(ctx context.Context, id string, request CreateRequest) (content.Ref, error) {
-	prompt := "A durable commitment is due. Deliver this reminder or recurring task in the canonical conversation: " + request.Message
-	if request.Importance == "important" {
-		prompt += " Call the local notification tool once so the user can find this time-sensitive message even when the web page is closed."
+func (s *Service) storeReminder(ctx context.Context, id string, request CreateRequest) (content.Ref, error) {
+	var task strings.Builder
+	if err := xml.EscapeText(&task, []byte(request.Task)); err != nil {
+		return content.Ref{}, fmt.Errorf("encode commitment task: %w", err)
 	}
-	return s.content.Put(ctx, []byte(prompt), content.Metadata{
-		MediaType: "text/plain; charset=utf-8", EncryptionDomain: "commitment", PrivacyClass: "private",
+	reminder := "<system_reminder>\n  <task>" + task.String() + "</task>\n</system_reminder>"
+	return s.content.Put(ctx, []byte(reminder), content.Metadata{
+		MediaType: "application/xml; charset=utf-8", EncryptionDomain: "commitment", PrivacyClass: "private",
 		RetentionPolicy: "until_commitment_deleted", ProvenanceRef: id,
 	})
 }
 
 func (s *Service) List(ctx context.Context, limit int) ([]Commitment, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
+	if limit <= 0 || limit > maxListedCommitments {
+		limit = maxListedCommitments
 	}
-	return s.repository.ListCommitments(ctx, limit)
+	commitments, err := s.repository.ListCommitments(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	for index := range commitments {
+		task, err := s.loadTask(ctx, commitments[index].TaskRef)
+		if err != nil {
+			return nil, fmt.Errorf("read commitment %s assignment: %w", commitments[index].ID, err)
+		}
+		commitments[index].Task = task
+		commitments[index].DeliveryRoute = commitments[index].Target.RoutingMode
+	}
+	return commitments, nil
+}
+
+func (s *Service) loadTask(ctx context.Context, ref content.Ref) (string, error) {
+	body, err := s.content.Get(ctx, ref)
+	if err != nil {
+		return "", err
+	}
+	var reminder struct {
+		Task string `xml:"task"`
+	}
+	if err := xml.Unmarshal(body, &reminder); err != nil {
+		return "", fmt.Errorf("decode system reminder: %w", err)
+	}
+	reminder.Task = strings.TrimSpace(reminder.Task)
+	if reminder.Task == "" {
+		return "", fmt.Errorf("system reminder has no task")
+	}
+	return reminder.Task, nil
 }
 
 func (s *Service) SetStatus(ctx context.Context, id, status string) error {

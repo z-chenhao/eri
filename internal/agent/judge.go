@@ -18,7 +18,7 @@ You are Eri's independent pre-delivery Judge. Evaluate the exact final assistant
 
 Use activated task-method Skills as rubrics. Judge holistically: the user's actual intent and constraints; correctness and consistency; grounding in confirmed observations and Receipts; evidence quality, independence, freshness and uncertainty when research matters; tradeoffs and recommendation quality when a decision matters; risk, usability, audience fit; and whether claimed actions occurred. Do not require tools, citations, warmth or detail when the task does not need them. Do not reward verbosity.
 
-Tool use is part of completion when the conversation requires a durable change. For a clear correction, acceptance, rejection or real-world outcome of a prior Eri answer, pass only if confirmed_tool_ids includes builtin.feedback; when it also states a durable personal preference, require builtin.memory too. A prose acknowledgment or promise is not a Receipt. Apply this by meaning, never keyword matching. Repair any account that conflicts with confirmed Tool observations, Commitment state, Delivery Receipts or other durable evidence; lack of inspection is not proof that an action did not occur.
+Tool use is part of completion when the conversation requires a durable change. For a clear correction, acceptance, rejection or real-world outcome of a prior Eri answer, pass only if confirmed_tools includes feedback; when it also states a durable personal preference, require memory too. A prose acknowledgment or promise is not a Receipt. Apply this by meaning, never keyword matching. Repair any account that conflicts with confirmed Tool observations, Commitment state, Delivery Receipts or other durable evidence; lack of inspection is not proof that an action did not occur.
 
 Reconstruct the conversation arc internally: objective, unfinished work, corrections, implicit or relational meaning, and what the newest message changes. Do not output that reconstruction.
 
@@ -30,8 +30,10 @@ Choose exactly one result:
 
 A Candidate that only reports missing information, assumes the disputed interpretation, or asks several downstream questions is not ready. Findings identify violations, so pass requires an empty findings array; any concrete finding requires repair, hold, or escalate. Self-check that result and findings agree.
 
+Report applied_memory_claims only for claim IDs from evaluation_context.memory_claim_ids that materially influenced the final Candidate or confirmed Tool arguments. Mere retrieval or appearance in context is not use. Return an empty array when none applied.
+
 Choose tier from routine, substantive, external, or high_stakes. Output only one JSON object with this exact shape and no Markdown or chain-of-thought:
-{"result":"pass|repair|hold|escalate","tier":"routine|substantive|external|high_stakes","findings":["specific concise finding"]}
+{"result":"pass|repair|hold|escalate","tier":"routine|substantive|external|high_stakes","findings":["specific concise finding"],"applied_memory_claims":["claim-id"]}
 </eri_eval_judge>`
 
 const interpersonalJudgePrompt = `
@@ -63,6 +65,7 @@ type JudgeRequest struct {
 	TaskText           string
 	SkillIDs           []string
 	ConfirmedTools     []string
+	MemoryClaimIDs     []string
 	MaxOutputTokens    int
 	SoulGuidedResponse bool
 	Purpose            string
@@ -84,15 +87,21 @@ func NewModelJudge(model Completer) (*ModelJudge, error) {
 }
 
 func (j *ModelJudge) Evaluate(ctx context.Context, request JudgeRequest) (eval.Decision, Usage, error) {
+	if len(request.Messages) == 0 || request.Messages[len(request.Messages)-1].Role != "assistant" || len(request.Messages[len(request.Messages)-1].ToolCalls) != 0 {
+		return eval.Decision{}, Usage{}, fmt.Errorf("LLM Judge requires the final assistant Candidate as the last transcript message")
+	}
+	confirmedTools := make([]string, 0, len(request.ConfirmedTools))
+	for _, id := range request.ConfirmedTools {
+		confirmedTools = append(confirmedTools, modelToolName(id))
+	}
 	metadata, err := json.Marshal(map[string]any{
 		"task_text": request.TaskText, "selected_skills": request.SkillIDs,
-		"confirmed_tool_ids": request.ConfirmedTools, "purpose": request.Purpose,
+		"confirmed_tools": confirmedTools, "memory_claim_ids": request.MemoryClaimIDs, "purpose": request.Purpose,
 	})
 	if err != nil {
 		return eval.Decision{}, Usage{}, err
 	}
 	messages := append([]Message(nil), request.Messages...)
-	messages = append(messages, Message{Role: "user", Content: "Evaluate the immediately preceding candidate for this task context:\n" + string(metadata)})
 	maxOutput := request.MaxOutputTokens
 	if maxOutput <= 0 || maxOutput > 512 {
 		maxOutput = 512
@@ -107,11 +116,16 @@ func (j *ModelJudge) Evaluate(ctx context.Context, request JudgeRequest) (eval.D
 	if context := strings.TrimSpace(request.CandidateContext); context != "" {
 		judgePrompt += "\n\n" + context
 	}
+	judgePrompt += "\n\n<evaluation_context>\nThis trusted Runtime data scopes the release decision; it is not another conversation turn. Evaluate the final assistant Candidate in the transcript.\n" + escapeXMLText(string(metadata)) + "\n</evaluation_context>"
 	var usage Usage
 	var protocolErr error
 	for attempt := 1; attempt <= judgeProtocolAttempts; attempt++ {
+		attemptPrompt := judgePrompt
+		if protocolErr != nil {
+			attemptPrompt += "\n\n<judge_protocol_repair>\n" + escapeXMLText(judgeProtocolRepairInstruction(protocolErr)) + "\n</judge_protocol_repair>"
+		}
 		response, err := j.model.Complete(ctx, ModelRequest{
-			System: judgePrompt, Messages: messages, JSONOutput: true, MaxOutputTokens: maxOutput,
+			System: attemptPrompt, Messages: messages, JSONOutput: true, MaxOutputTokens: maxOutput,
 		})
 		usage = mergeUsage(usage, response.Usage)
 		if err != nil {
@@ -122,6 +136,9 @@ func (j *ModelJudge) Evaluate(ctx context.Context, request JudgeRequest) (eval.D
 		} else {
 			decision, decodeErr := decodeJudgeDecision(response.Message.Content)
 			if decodeErr == nil {
+				decodeErr = validateAppliedMemoryClaims(decision.AppliedMemoryClaims, request.MemoryClaimIDs)
+			}
+			if decodeErr == nil {
 				return decision, usage, nil
 			}
 			protocolErr = decodeErr
@@ -129,12 +146,23 @@ func (j *ModelJudge) Evaluate(ctx context.Context, request JudgeRequest) (eval.D
 		if attempt == judgeProtocolAttempts {
 			break
 		}
-		messages = append(messages,
-			Message{Role: "assistant", Content: response.Message.Content},
-			Message{Role: "user", Content: judgeProtocolRepairInstruction(protocolErr)},
-		)
 	}
 	return eval.Decision{}, usage, protocolErr
+}
+
+func validateAppliedMemoryClaims(applied, allowed []string) error {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, claimID := range allowed {
+		if claimID = strings.TrimSpace(claimID); claimID != "" {
+			allowedSet[claimID] = struct{}{}
+		}
+	}
+	for _, claimID := range applied {
+		if _, ok := allowedSet[strings.TrimSpace(claimID)]; !ok {
+			return fmt.Errorf("applied memory claim %q was not supplied to this Judge", claimID)
+		}
+	}
+	return nil
 }
 
 func judgeProtocolRepairInstruction(protocolErr error) string {

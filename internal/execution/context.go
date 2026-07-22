@@ -51,6 +51,14 @@ type RuntimeCompaction struct {
 	SummarizedMessages int `json:"summarized_messages"`
 }
 
+// MemoryBinding preserves the retrieval that made one Memory claim available
+// to a Run. It contains identities only; statement text remains governed.
+type MemoryBinding struct {
+	RetrievalID string `json:"retrieval_id"`
+	MemoryID    string `json:"memory_id"`
+	ClaimID     string `json:"claim_id"`
+}
+
 // TaskCapsule identifies the durable Runtime task represented in one Agent
 // Run. The objective body remains in the governed Content Store; this
 // manifest records only safe provenance and scheduling facts.
@@ -64,6 +72,7 @@ type TaskCapsule struct {
 	TriggerState        string    `json:"trigger_state,omitempty"`
 	ExecutionPhase      string    `json:"execution_phase,omitempty"`
 	CommitmentID        string    `json:"commitment_id,omitempty"`
+	Importance          string    `json:"importance,omitempty"`
 	ScheduledFor        time.Time `json:"scheduled_for,omitempty"`
 }
 
@@ -73,8 +82,11 @@ type ContextManifest struct {
 	IdentityID               string              `json:"identity_id"`
 	SoulVersion              string              `json:"soul_version"`
 	MemoryRetrievalID        string              `json:"memory_retrieval_id,omitempty"`
+	MemoryToolRetrievalIDs   []string            `json:"memory_tool_retrieval_ids,omitempty"`
+	MemoryBindings           []MemoryBinding     `json:"memory_bindings,omitempty"`
 	RetrievedMemoryIDs       []string            `json:"retrieved_memory_ids,omitempty"`
 	MemoryIDs                []string            `json:"memory"`
+	MemoryClaimIDs           []string            `json:"memory_claim_ids,omitempty"`
 	AppliedMemoryIDs         []string            `json:"applied_memory_ids,omitempty"`
 	MemoryChecked            bool                `json:"memory_checked"`
 	SkillIDs                 []string            `json:"skills"`

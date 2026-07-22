@@ -45,12 +45,44 @@ type Descriptor struct {
 }
 
 type Prepared struct {
-	Input               json.RawMessage
-	Action              policy.Action
-	TaskID              string
-	RunID               string
-	InvocationID        string
-	SourceInteractionID string
+	Input                 json.RawMessage
+	Action                policy.Action
+	TaskID                string
+	RunID                 string
+	InvocationID          string
+	SourceInteractionID   string
+	SourceInteractionText string
+	SourceInteractionRole string
+	SourceInteractionKind string
+	// SourceBinding declares which authoritative interaction facts a Tool needs
+	// before an effect may be persisted. The Gateway validates the binding once,
+	// stores only a content-free proof beside the encrypted normalized payload,
+	// and restores that proof during authorized-intent recovery.
+	SourceBinding          SourceBinding
+	SourceExcerpt          string
+	SourceContextValidated bool
+}
+
+type SourceBinding string
+
+const (
+	SourceBindingInteraction       SourceBinding = "interaction"
+	SourceBindingDirectUserExcerpt SourceBinding = "direct_user_excerpt"
+)
+
+const durablePreparedProtocol = "eri.source-bound-prepared.v1"
+
+type durablePreparedPayload struct {
+	Protocol string               `json:"protocol"`
+	Input    json.RawMessage      `json:"input"`
+	Source   durableSourceContext `json:"source"`
+}
+
+type durableSourceContext struct {
+	Binding       SourceBinding `json:"binding"`
+	InteractionID string        `json:"interaction_id"`
+	Role          string        `json:"role"`
+	Kind          string        `json:"kind"`
 }
 
 type Result struct {
@@ -184,6 +216,9 @@ type Request struct {
 	RunID                     string
 	InvocationID              string
 	SourceInteractionID       string
+	SourceInteractionText     string
+	SourceInteractionRole     string
+	SourceInteractionKind     string
 	ToolCallID                string
 	BasisInputSequence        int64
 	BasisConversationSequence int64
@@ -340,7 +375,22 @@ func (g *Gateway) Invoke(ctx context.Context, request Request) (Outcome, error) 
 	if err != nil {
 		return Outcome{}, fmt.Errorf("validate %s input: %w", descriptor.ID, err)
 	}
+	prepared.TaskID = request.TaskID
+	prepared.RunID = request.RunID
+	prepared.InvocationID = request.InvocationID
 	prepared.SourceInteractionID = request.SourceInteractionID
+	prepared.SourceInteractionRole = request.SourceInteractionRole
+	prepared.SourceInteractionKind = request.SourceInteractionKind
+	if prepared.SourceBinding == SourceBindingDirectUserExcerpt {
+		// Exact source text exists only long enough to validate the excerpt. The
+		// durable effect payload stores a content-free proof, never another copy
+		// of the Conversation body.
+		prepared.SourceInteractionText = request.SourceInteractionText
+	}
+	prepared, durablePayload, err := bindPreparedSourceContext(prepared)
+	if err != nil {
+		return Outcome{}, fmt.Errorf("bind %s source context: %w", descriptor.ID, err)
+	}
 	if !allowsEffect(descriptor.AllowedEffects, prepared.Action.Effect) {
 		return Outcome{}, fmt.Errorf("tool %s does not declare effect %q", descriptor.ID, prepared.Action.Effect)
 	}
@@ -361,13 +411,13 @@ func (g *Gateway) Invoke(ctx context.Context, request Request) (Outcome, error) 
 		(assessment.Control == policy.OrdinaryConfirm || assessment.Control == policy.StrongApproval) {
 		return Outcome{}, fmt.Errorf("tool %s requires approval unavailable to this agent", descriptor.ID)
 	}
-	parametersHash := hashBytes(prepared.Input)
+	parametersHash := hashBytes(durablePayload)
 	now := g.now().UTC()
 	intentID, err := identifier.New()
 	if err != nil {
 		return Outcome{}, err
 	}
-	payloadRef, err := g.content.Put(ctx, prepared.Input, content.Metadata{
+	payloadRef, err := g.content.Put(ctx, durablePayload, content.Metadata{
 		MediaType: "application/json", EncryptionDomain: "effect_payload", PrivacyClass: "private",
 		RetentionPolicy: "until_task_complete", ProvenanceRef: intentID,
 	})
@@ -381,7 +431,7 @@ func (g *Gateway) Invoke(ctx context.Context, request Request) (Outcome, error) 
 		ToolID: descriptor.ID, ToolVersion: descriptor.Version,
 		Effect: prepared.Action.Effect, Target: prepared.Action.Target,
 		ParametersHash: parametersHash, PayloadRef: payloadRef,
-		IdempotencyKey: hashBytes([]byte(request.TaskID + "\x00" + request.RunID + "\x00" + request.ParentIntentID + "\x00" + descriptor.ID + "\x00" + descriptor.Version + "\x00" + parametersHash)),
+		IdempotencyKey: hashBytes([]byte(request.TaskID + "\x00" + request.RunID + "\x00" + request.ParentIntentID + "\x00" + request.ToolCallID + "\x00" + descriptor.ID + "\x00" + descriptor.Version + "\x00" + parametersHash)),
 		Control:        assessment.Control, ReconciliationStrategy: descriptor.Reconciliation,
 		Status: IntentPlanned, CreatedAt: now, UpdatedAt: now,
 	}
@@ -427,6 +477,69 @@ func (g *Gateway) Invoke(ctx context.Context, request Request) (Outcome, error) 
 	intent.Status = IntentAuthorized
 	intent.GrantID = grantID(request.Grant)
 	return g.executeAuthorized(ctx, intent, assessment.Control, candidate, prepared, descriptor)
+}
+
+func bindPreparedSourceContext(prepared Prepared) (Prepared, json.RawMessage, error) {
+	if prepared.SourceBinding == "" {
+		return prepared, append(json.RawMessage(nil), prepared.Input...), nil
+	}
+	interactionID := strings.TrimSpace(prepared.SourceInteractionID)
+	if interactionID == "" {
+		return Prepared{}, nil, fmt.Errorf("source interaction id is required")
+	}
+	switch prepared.SourceBinding {
+	case SourceBindingInteraction:
+	case SourceBindingDirectUserExcerpt:
+		if prepared.SourceInteractionRole != "user" || prepared.SourceInteractionKind == "internal_trigger" {
+			return Prepared{}, nil, fmt.Errorf("source must be a real user interaction")
+		}
+		excerpt := strings.TrimSpace(prepared.SourceExcerpt)
+		if excerpt == "" || !strings.Contains(prepared.SourceInteractionText, excerpt) {
+			return Prepared{}, nil, fmt.Errorf("source does not contain the exact requested excerpt")
+		}
+	default:
+		return Prepared{}, nil, fmt.Errorf("unsupported source binding %q", prepared.SourceBinding)
+	}
+	prepared.SourceContextValidated = true
+	envelope := durablePreparedPayload{
+		Protocol: durablePreparedProtocol,
+		Input:    append(json.RawMessage(nil), prepared.Input...),
+		Source: durableSourceContext{
+			Binding: prepared.SourceBinding, InteractionID: interactionID,
+			Role: prepared.SourceInteractionRole, Kind: prepared.SourceInteractionKind,
+		},
+	}
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		return Prepared{}, nil, err
+	}
+	return prepared, encoded, nil
+}
+
+func restorePreparedSourceContext(ctx context.Context, candidate Tool, payload json.RawMessage) (Prepared, error) {
+	var envelope durablePreparedPayload
+	if err := json.Unmarshal(payload, &envelope); err != nil || envelope.Protocol != durablePreparedProtocol {
+		return candidate.Prepare(ctx, payload)
+	}
+	if len(envelope.Input) == 0 || strings.TrimSpace(envelope.Source.InteractionID) == "" || envelope.Source.Binding == "" {
+		return Prepared{}, fmt.Errorf("source-bound effect payload is incomplete")
+	}
+	prepared, err := candidate.Prepare(ctx, envelope.Input)
+	if err != nil {
+		return Prepared{}, err
+	}
+	if prepared.SourceBinding != envelope.Source.Binding {
+		return Prepared{}, fmt.Errorf("source binding does not match normalized input")
+	}
+	if prepared.SourceBinding == SourceBindingDirectUserExcerpt &&
+		(envelope.Source.Role != "user" || envelope.Source.Kind == "internal_trigger") {
+		return Prepared{}, fmt.Errorf("direct-user source proof is invalid")
+	}
+	prepared.SourceInteractionID = envelope.Source.InteractionID
+	prepared.SourceInteractionRole = envelope.Source.Role
+	prepared.SourceInteractionKind = envelope.Source.Kind
+	prepared.SourceContextValidated = true
+	return prepared, nil
 }
 
 func (g *Gateway) executeAuthorized(ctx context.Context, intent Intent, control policy.ControlLevel, candidate Tool, prepared Prepared, descriptor Descriptor) (Outcome, error) {
@@ -521,7 +634,7 @@ func (g *Gateway) Reconcile(ctx context.Context, intentID string, attempt int) e
 		if intent.GrantID != "" {
 			return g.store.RecordReconciliationAttempt(ctx, intent.ID, "manual", "approved_grant_requires_revalidation")
 		}
-		prepared, err := candidate.Prepare(ctx, payload)
+		prepared, err := restorePreparedSourceContext(ctx, candidate, payload)
 		if err != nil || prepared.Action.Target != intent.Target || prepared.Action.Effect != intent.Effect {
 			return g.store.RecordReconciliationAttempt(ctx, intent.ID, "manual", "effect_payload_no_longer_valid")
 		}

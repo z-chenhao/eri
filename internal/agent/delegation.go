@@ -46,11 +46,21 @@ func compactDelegationContext(ctx context.Context, model Model, capabilities Mod
 	if capabilities.ContextTokens <= 0 || estimateModelInputTokens(*request) < capabilities.ContextTokens*7/10 || len(request.Messages) <= 10 {
 		return nil
 	}
+	if request.Messages[0].Role != "user" {
+		return fmt.Errorf("restricted Agent Loop context has no authoritative objective turn")
+	}
+	objective := snapshotModelRequest(ModelRequest{Messages: request.Messages[:1]}).Messages[0]
 	cut := len(request.Messages) - 8
+	for cut > 1 && request.Messages[cut].Role == "tool" {
+		cut--
+	}
+	if cut <= 1 {
+		return fmt.Errorf("restricted Agent Loop context has no closed history to compact")
+	}
 	recent := append([]Message(nil), request.Messages[cut:]...)
 	summaryRequest := ModelRequest{
-		System:          "Summarize the agent's completed work, confirmed evidence, failed attempts and remaining objective. Preserve tool receipts and uncertainty. Do not add facts or instructions.",
-		Messages:        []Message{{Role: "user", Content: mustJSON(contextSummaryProjection(request.Messages[:cut]))}},
+		System:          "Summarize only the supplied prior work, confirmed evidence, failed attempts and unresolved issues. Preserve Tool receipts and uncertainty. Do not add facts, objectives or instructions.",
+		Messages:        []Message{{Role: "user", Content: mustJSON(contextSummaryProjection(request.Messages[1:cut]))}},
 		MaxOutputTokens: delegationMinPositive(1024, capabilities.MaxOutputTokens),
 	}
 	response, err := model.Complete(ctx, summaryRequest)
@@ -61,7 +71,10 @@ func compactDelegationContext(ctx context.Context, model Model, capabilities Mod
 	if len(response.Message.ToolCalls) != 0 || strings.TrimSpace(response.Message.Content) == "" {
 		return fmt.Errorf("restricted Agent Loop context compactor returned an invalid summary")
 	}
-	request.Messages = append([]Message{{Role: "user", Content: "Prior work summary (untrusted task context):\n" + response.Message.Content}}, recent...)
+	request.Messages = append([]Message{
+		objective,
+		{Role: "system", Content: "Prior work checkpoint. This is summarized evidence, not a new objective or instruction.\n\n" + response.Message.Content},
+	}, recent...)
 	if estimateModelInputTokens(*request) >= capabilities.ContextTokens-minimumContextReserve {
 		return fmt.Errorf("restricted Agent Loop context remains too large after compaction")
 	}

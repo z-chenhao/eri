@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,7 +23,11 @@ func TestGatewayPersistsBeforeDispatchAndReplaysConfirmedResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := Request{TaskID: "task", RunID: "run", InvocationID: "invocation", ToolCallID: "call-1", ToolID: "test.tool", Input: json.RawMessage(`{"query":"hello"}`)}
+	request := Request{
+		TaskID: "task", RunID: "run", InvocationID: "invocation", ToolCallID: "call-1", ToolID: "test.tool",
+		SourceInteractionID: "interaction-1", SourceInteractionText: "private source text",
+		Input: json.RawMessage(`{"query":"hello"}`),
+	}
 	first, err := gateway.Invoke(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -40,6 +45,9 @@ func TestGatewayPersistsBeforeDispatchAndReplaysConfirmedResult(t *testing.T) {
 	if candidate.lastPrepared.TaskID != "task" || candidate.lastPrepared.RunID != "run" || candidate.lastPrepared.InvocationID != first.Intent.ID {
 		t.Fatalf("gateway runtime identity = %+v", candidate.lastPrepared)
 	}
+	if candidate.lastPrepared.SourceInteractionID != "interaction-1" || candidate.lastPrepared.SourceInteractionText != "" {
+		t.Fatalf("ordinary Tool received unnecessary source text: %+v", candidate.lastPrepared)
+	}
 	if len(store.transitions) != 3 || store.transitions[0] != "planned->authorized" || store.transitions[1] != "authorized->dispatched" || store.transitions[2] != "dispatched->confirmed" {
 		t.Fatalf("transitions = %#v", store.transitions)
 	}
@@ -49,6 +57,97 @@ func TestGatewayPersistsBeforeDispatchAndReplaysConfirmedResult(t *testing.T) {
 	}
 	if !second.Replayed || candidate.calls != 1 {
 		t.Fatalf("duplicate invocation executed again: outcome=%+v calls=%d", second, candidate.calls)
+	}
+}
+
+func TestGatewaySuppliesExactSourceTextOnlyToMemory(t *testing.T) {
+	store := newMemoryIntentStore()
+	results := newMemoryContentStore()
+	candidate := &fakeTool{
+		id: "builtin.memory", effect: policy.Reversible, target: "memory",
+		sourceBinding: SourceBindingDirectUserExcerpt, requireValidatedSource: true,
+	}
+	gateway, err := NewGateway(store, results, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = gateway.Invoke(context.Background(), Request{
+		TaskID: "task", RunID: "run", ToolCallID: "call-memory", ToolID: "builtin.memory",
+		SourceInteractionID: "interaction-memory", SourceInteractionText: "Please note: I prefer quiet rooms.",
+		SourceInteractionRole: "user", SourceInteractionKind: "text",
+		Input: json.RawMessage(`{"operation":"record","statement":"I prefer quiet rooms."}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidate.lastPrepared.SourceInteractionID != "interaction-memory" || candidate.lastPrepared.SourceInteractionText != "Please note: I prefer quiet rooms." || !candidate.lastPrepared.SourceContextValidated {
+		t.Fatalf("Memory did not receive authoritative source evidence: %+v", candidate.lastPrepared)
+	}
+}
+
+func TestGatewayRecoversAuthorizedSourceBoundMemoryWithoutPersistingConversationBody(t *testing.T) {
+	store := newMemoryIntentStore()
+	store.failAuthorizedDispatchOnce = true
+	results := newMemoryContentStore()
+	candidate := &fakeTool{
+		id: "builtin.memory", effect: policy.Reversible, target: "memory",
+		sourceBinding: SourceBindingDirectUserExcerpt, requireValidatedSource: true,
+	}
+	gateway, err := NewGateway(store, results, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = gateway.Invoke(context.Background(), Request{
+		TaskID: "task", RunID: "run", ToolCallID: "call-memory", ToolID: "builtin.memory",
+		SourceInteractionID: "interaction-memory", SourceInteractionText: "private prefix; I prefer quiet rooms.; private suffix",
+		SourceInteractionRole: "user", SourceInteractionKind: "text",
+		Input: json.RawMessage(`{"operation":"record","statement":"I prefer quiet rooms."}`),
+	})
+	if err == nil || candidate.calls != 0 || len(store.byKey) != 1 {
+		t.Fatalf("expected crash window after authorization: intents=%d calls=%d err=%v", len(store.byKey), candidate.calls, err)
+	}
+	var intentID string
+	for _, stored := range store.byKey {
+		intentID = stored.ID
+	}
+	intent, found, err := store.LoadIntentByID(context.Background(), intentID)
+	if err != nil || !found || intent.Status != IntentAuthorized {
+		t.Fatalf("authorized intent=%+v found=%v err=%v", intent, found, err)
+	}
+	payload, err := results.Get(context.Background(), intent.PayloadRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), "private prefix") || strings.Contains(string(payload), "private suffix") {
+		t.Fatalf("durable source proof copied the Conversation body: %s", payload)
+	}
+	if err := gateway.Reconcile(context.Background(), intent.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	if candidate.calls != 1 || !candidate.lastPrepared.SourceContextValidated || candidate.lastPrepared.SourceInteractionID != "interaction-memory" || candidate.lastPrepared.SourceInteractionText != "" {
+		t.Fatalf("recovered Memory source context=%+v calls=%d", candidate.lastPrepared, candidate.calls)
+	}
+}
+
+func TestGatewayRejectsMemoryStatementNotPresentInCurrentUserMessage(t *testing.T) {
+	store := newMemoryIntentStore()
+	results := newMemoryContentStore()
+	candidate := &fakeTool{
+		id: "builtin.memory", effect: policy.Reversible, target: "memory",
+		sourceBinding: SourceBindingDirectUserExcerpt, requireValidatedSource: true,
+	}
+	gateway, err := NewGateway(store, results, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = gateway.Invoke(context.Background(), Request{
+		TaskID: "task", RunID: "run", ToolID: "builtin.memory",
+		SourceInteractionID: "interaction-memory", SourceInteractionText: "I prefer quiet rooms.",
+		SourceInteractionRole: "user", SourceInteractionKind: "text",
+		Input: json.RawMessage(`{"operation":"record","statement":"The user dislikes every noisy place."}`),
+	})
+	if err == nil || len(store.byKey) != 0 || candidate.calls != 0 {
+		t.Fatalf("unsupported Memory inference was persisted: intents=%d calls=%d err=%v", len(store.byKey), candidate.calls, err)
 	}
 }
 
@@ -74,6 +173,29 @@ func TestGatewaySeparatesIdenticalChildCallsByParentDelegation(t *testing.T) {
 	}
 	if first.Intent.ID == second.Intent.ID || first.Intent.IdempotencyKey == second.Intent.IdempotencyKey || candidate.calls != 2 {
 		t.Fatalf("first=%+v second=%+v calls=%d", first.Intent, second.Intent, candidate.calls)
+	}
+}
+
+func TestGatewayTreatsNewNativeToolCallAsFreshReadWithIdenticalParameters(t *testing.T) {
+	store := newMemoryIntentStore()
+	results := newMemoryContentStore()
+	candidate := &fakeTool{effect: policy.ReadOnly, target: "memory"}
+	gateway, err := NewGateway(store, results, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := Request{TaskID: "task", RunID: "run", ToolID: "test.tool", ToolCallID: "read-before-mutation", Input: json.RawMessage(`{"query":"same"}`)}
+	first, err := gateway.Invoke(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.ToolCallID = "read-after-mutation"
+	second, err := gateway.Invoke(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Intent.ID == second.Intent.ID || first.Intent.IdempotencyKey == second.Intent.IdempotencyKey || candidate.calls != 2 {
+		t.Fatalf("new native read replayed stale result: first=%+v second=%+v calls=%d", first.Intent, second.Intent, candidate.calls)
 	}
 }
 
@@ -250,15 +372,18 @@ func (f *fakePluginTool) Prepare(context.Context, json.RawMessage) (Prepared, er
 func (f *fakePluginTool) Execute(context.Context, Prepared) (Result, error) { return Result{}, nil }
 
 type fakeTool struct {
-	effect          policy.EffectClass
-	target          string
-	overwrite       bool
-	executeErr      error
-	reconcileResult ReconcileResult
-	reconcileErr    error
-	reconcileCalls  int
-	calls           int
-	lastPrepared    Prepared
+	id                     string
+	effect                 policy.EffectClass
+	target                 string
+	overwrite              bool
+	executeErr             error
+	reconcileResult        ReconcileResult
+	reconcileErr           error
+	reconcileCalls         int
+	calls                  int
+	lastPrepared           Prepared
+	sourceBinding          SourceBinding
+	requireValidatedSource bool
 }
 
 func (f *fakeTool) Reconcile(_ context.Context, request ReconcileRequest) (ReconcileResult, error) {
@@ -270,8 +395,12 @@ func (f *fakeTool) Reconcile(_ context.Context, request ReconcileRequest) (Recon
 }
 
 func (f *fakeTool) Descriptor() Descriptor {
+	id := f.id
+	if id == "" {
+		id = "test.tool"
+	}
 	return Descriptor{
-		ID: "test.tool", Version: "1.0.0", Purpose: "test",
+		ID: id, Version: "1.0.0", Purpose: "test",
 		AllowedEffects: []policy.EffectClass{policy.ReadOnly, policy.Reversible},
 		Reconciliation: "test", Source: BuiltIn,
 	}
@@ -281,12 +410,25 @@ func (f *fakeTool) Prepare(_ context.Context, raw json.RawMessage) (Prepared, er
 	if !json.Valid(raw) {
 		return Prepared{}, errors.New("invalid json")
 	}
-	return Prepared{Input: raw, Action: policy.Action{Effect: f.effect, Target: f.target, OverwritesExisting: f.overwrite}}, nil
+	prepared := Prepared{Input: raw, Action: policy.Action{Effect: f.effect, Target: f.target, OverwritesExisting: f.overwrite}, SourceBinding: f.sourceBinding}
+	if f.sourceBinding == SourceBindingDirectUserExcerpt {
+		var input struct {
+			Statement string `json:"statement"`
+		}
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return Prepared{}, err
+		}
+		prepared.SourceExcerpt = input.Statement
+	}
+	return prepared, nil
 }
 
 func (f *fakeTool) Execute(_ context.Context, prepared Prepared) (Result, error) {
 	f.calls++
 	f.lastPrepared = prepared
+	if f.requireValidatedSource && !prepared.SourceContextValidated {
+		return Result{}, errors.New("missing validated source context")
+	}
 	if f.executeErr != nil {
 		return Result{}, f.executeErr
 	}
@@ -294,10 +436,11 @@ func (f *fakeTool) Execute(_ context.Context, prepared Prepared) (Result, error)
 }
 
 type memoryIntentStore struct {
-	byKey           map[string]Intent
-	keyByID         map[string]string
-	transitions     []string
-	reconciliations []string
+	byKey                      map[string]Intent
+	keyByID                    map[string]string
+	transitions                []string
+	reconciliations            []string
+	failAuthorizedDispatchOnce bool
 }
 
 func (s *memoryIntentStore) LoadIntentByID(_ context.Context, id string) (Intent, bool, error) {
@@ -327,6 +470,10 @@ func (s *memoryIntentStore) PlanIntent(_ context.Context, intent Intent) (Intent
 }
 
 func (s *memoryIntentStore) TransitionIntent(_ context.Context, id string, from, to IntentStatus, errorCode, approvalID, grantID string, result content.Ref) error {
+	if from == IntentAuthorized && to == IntentDispatched && s.failAuthorizedDispatchOnce {
+		s.failAuthorizedDispatchOnce = false
+		return errors.New("simulated crash before dispatch")
+	}
 	key := s.keyByID[id]
 	intent := s.byKey[key]
 	if intent.Status != from {

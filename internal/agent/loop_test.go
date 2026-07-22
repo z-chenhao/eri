@@ -12,6 +12,7 @@ import (
 	"github.com/z-chenhao/eri/internal/eval"
 	"github.com/z-chenhao/eri/internal/execution"
 	"github.com/z-chenhao/eri/internal/identity"
+	"github.com/z-chenhao/eri/internal/memory"
 	"github.com/z-chenhao/eri/internal/runtime"
 	"github.com/z-chenhao/eri/internal/tool"
 )
@@ -105,7 +106,10 @@ func TestAgentLoopAdmitsNewUserInputWithoutCancelingInflightModelCall(t *testing
 	})
 	task := TaskContext{TaskID: "task", RunID: "run", ExecutionID: "invocation", InputSequence: 1}
 	state := loopState{TaskText: "Plan the trip for Friday.", InputSequence: 1, Trace: runTrace{}}
-	request := ModelRequest{Messages: []Message{{Role: "user", Content: "Plan the trip for Friday."}}, MaxOutputTokens: 1024}
+	request := ModelRequest{Messages: []Message{
+		{Role: "system", Content: "<relevant_memory>obsolete Friday preference</relevant_memory>"},
+		{Role: "user", Content: "Plan the trip for Friday."},
+	}, MaxOutputTokens: 1024}
 
 	if err := service.continueLoop(context.Background(), task, request, nil, state); err != nil {
 		t.Fatal(err)
@@ -120,8 +124,8 @@ func TestAgentLoopAdmitsNewUserInputWithoutCancelingInflightModelCall(t *testing
 		t.Fatalf("joined input = %+v", got)
 	}
 	for _, message := range model.requests[1].Messages {
-		if message.Content == "Friday plan ready." {
-			t.Fatal("superseded assistant result leaked into the resumed model context")
+		if message.Content == "Friday plan ready." || strings.Contains(message.Content, "obsolete Friday preference") {
+			t.Fatal("superseded candidate or Memory leaked into the resumed model context")
 		}
 	}
 	if repository.commit.BasisInputSequence != 2 || repository.commit.TerminalStatus != "completed" {
@@ -254,7 +258,10 @@ func TestAgentLoopClosesPartialToolFrameBeforeAdmittingNewInput(t *testing.T) {
 		MaxEvalAttempts: 3, MaxOutputTokens: 1024, Judge: loopTestJudge{},
 	})
 	request := ModelRequest{
-		Messages:        []Message{{Role: "user", Content: "Check two weather sources."}},
+		Messages: []Message{
+			{Role: "system", Content: "<relevant_memory>obsolete weather preference</relevant_memory>"},
+			{Role: "user", Content: "Check two weather sources."},
+		},
 		Tools:           []ToolDefinition{{Name: "lookup", Description: "lookup", Parameters: map[string]any{"type": "object"}}},
 		MaxOutputTokens: 1024,
 	}
@@ -975,6 +982,254 @@ type loopTestJudge struct{}
 
 func (loopTestJudge) Evaluate(context.Context, JudgeRequest) (eval.Decision, Usage, error) {
 	return eval.Decision{Result: eval.Pass, Tier: "routine"}, Usage{}, nil
+}
+
+func TestResolveAppliedMemoryUsesJudgeClaimsAndRetrievalManifest(t *testing.T) {
+	manifest := execution.ContextManifest{
+		MemoryRetrievalID: "retrieval-1",
+		MemoryIDs:         []string{"memory-a", "memory-b"},
+		MemoryClaimIDs:    []string{"claim-a", "claim-b"},
+	}
+	uses, err := resolveAppliedMemoryUses(manifest, []string{"claim-b", "claim-b"})
+	if err != nil || len(uses) != 1 || uses[0].RetrievalID != "retrieval-1" || len(uses[0].MemoryIDs) != 1 || uses[0].MemoryIDs[0] != "memory-b" {
+		t.Fatalf("resolved uses=%v err=%v", uses, err)
+	}
+	if _, err := resolveAppliedMemoryUses(manifest, []string{"claim-unknown"}); err == nil {
+		t.Fatal("unknown Judge Memory claim was accepted")
+	}
+}
+
+func TestResolveAppliedMemoryUsesPreservesEachRetrieval(t *testing.T) {
+	manifest := execution.ContextManifest{MemoryBindings: []execution.MemoryBinding{
+		{RetrievalID: "retrieval-auto", MemoryID: "memory-a", ClaimID: "claim-a"},
+		{RetrievalID: "retrieval-tool", MemoryID: "memory-b", ClaimID: "claim-b"},
+	}}
+	uses, err := resolveAppliedMemoryUses(manifest, []string{"claim-a", "claim-b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uses) != 2 || uses[0].RetrievalID != "retrieval-auto" || len(uses[0].MemoryIDs) != 1 || uses[0].MemoryIDs[0] != "memory-a" ||
+		uses[1].RetrievalID != "retrieval-tool" || len(uses[1].MemoryIDs) != 1 || uses[1].MemoryIDs[0] != "memory-b" {
+		t.Fatalf("resolved uses=%v", uses)
+	}
+}
+
+func TestResolveAppliedMemoryUsesPreservesEveryRetrievalForSameClaim(t *testing.T) {
+	manifest := execution.ContextManifest{MemoryBindings: []execution.MemoryBinding{
+		{RetrievalID: "retrieval-auto", MemoryID: "memory-a", ClaimID: "claim-a"},
+		{RetrievalID: "retrieval-tool", MemoryID: "memory-a", ClaimID: "claim-a"},
+	}}
+	uses, err := resolveAppliedMemoryUses(manifest, []string{"claim-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uses) != 2 || uses[0].RetrievalID != "retrieval-auto" || len(uses[0].MemoryIDs) != 1 || uses[0].MemoryIDs[0] != "memory-a" ||
+		uses[1].RetrievalID != "retrieval-tool" || len(uses[1].MemoryIDs) != 1 || uses[1].MemoryIDs[0] != "memory-a" {
+		t.Fatalf("resolved uses=%v", uses)
+	}
+}
+
+func TestModelVisibleToolResultOmitsCanonicalSourceAndPrivateAttachmentRefs(t *testing.T) {
+	visible := modelVisibleToolResult(tool.Result{
+		Output: json.RawMessage(`{"ok":true}`), Source: "builtin:builtin.memory@0.2.0",
+		Receipt: "sha256:result", FreshAt: time.Now().UTC(),
+		Attachments: []tool.Attachment{{ID: "attachment", ContentRef: content.Ref{ObjectID: "private-object"}}},
+	})
+	encoded, err := json.Marshal(visible)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "builtin") || strings.Contains(string(encoded), "private-object") || !strings.Contains(string(encoded), "sha256:result") {
+		t.Fatalf("model-visible Tool result=%s", encoded)
+	}
+}
+
+func TestConfirmedMemoryForgetRemovesSelectedTextFromFinalTranscript(t *testing.T) {
+	contentStore, err := content.New(t.TempDir(), []byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &loopTestRepository{}
+	service := &Service{identity: identity.Snapshot{Soul: "stable soul"}, repository: repository, content: contentStore}
+	request := ModelRequest{Messages: []Message{
+		{Role: "system", Content: "<relevant_memory>private deleted preference</relevant_memory>"},
+		{Role: "user", Content: "Forget that preference."},
+	}}
+	state := loopState{
+		TaskText: "Forget that preference.", ProtectedSourceMessage: 2,
+		JudgeContext: "<relevant_memory_evidence>private deleted preference</relevant_memory_evidence>",
+		ContextManifest: execution.ContextManifest{
+			MemoryRetrievalID: "retrieval-1", MemoryIDs: []string{"memory-delete"}, MemoryClaimIDs: []string{"claim-delete"},
+			MemoryBindings: []execution.MemoryBinding{
+				{RetrievalID: "retrieval-1", MemoryID: "memory-delete", ClaimID: "claim-delete"},
+				{RetrievalID: "retrieval-1", MemoryID: "memory-other", ClaimID: "claim-other"},
+			},
+		},
+		PendingMemoryMutations: []pendingMemoryMutation{{Operation: "forget", TargetID: "memory-delete", Receipt: "sha256:forget", Status: "confirmed"}},
+	}
+	if err := service.finalizePendingMemoryMutations(context.Background(), TaskContext{TaskID: "task", RunID: "run", ExecutionID: "execution"}, &request, nil, &state); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(traceWithProviderTranscript(runTrace{}, request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "private deleted preference") || strings.Contains(state.JudgeContext, "private deleted preference") {
+		t.Fatalf("deleted Memory survived trace or Judge context: trace=%s judge=%s", encoded, state.JudgeContext)
+	}
+	if state.ContextManifest.MemoryRetrievalID != "" || len(state.ContextManifest.MemoryIDs) != 0 || len(state.ContextManifest.MemoryBindings) != 0 || state.ProtectedSourceMessage != 1 || len(state.PendingMemoryMutations) != 0 {
+		t.Fatalf("forget context state=%+v source=%d", state.ContextManifest, state.ProtectedSourceMessage)
+	}
+	if len(request.Messages) != 2 || request.Messages[0].Role != "user" || request.Messages[1].Role != "system" || !strings.Contains(request.Messages[1].Content, `<runtime_event type="memory.mutated">`) {
+		t.Fatalf("sanitized mutation context=%+v", request.Messages)
+	}
+	if repository.checkpointPhase != "ready_for_model" {
+		t.Fatalf("sanitized checkpoint phase=%q", repository.checkpointPhase)
+	}
+}
+
+func TestConfirmedMemoryForgetRemovesExposedFramesAndPreservesSafeReceipt(t *testing.T) {
+	bundleBody, err := json.Marshal(memory.Bundle{
+		RetrievalID:  "retrieval-tool",
+		RetrievedIDs: []string{"memory-delete"},
+		Entries: []memory.Entry{{
+			Snapshot:  memory.Snapshot{MemoryID: "memory-delete", ClaimID: "claim-delete", Status: memory.Supported},
+			Statement: "private deleted preference",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation, err := json.Marshal(map[string]any{
+		"success": true,
+		"result":  tool.Result{Output: bundleBody, Receipt: "search-receipt"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := ModelRequest{Messages: []Message{
+		{Role: "user", Content: "Forget the private preference."},
+		{Role: "assistant", ReasoningContent: "exact untouched provider reasoning", ToolCalls: []ToolCall{{ID: "unrelated-read", Name: "files", Arguments: json.RawMessage(`{"operation":"read","path":"notes.txt"}`)}}},
+		{Role: "tool", ToolCallID: "unrelated-read", Content: `{"success":true,"intent_id":"intent-read","status":"confirmed","tool_id":"files","result":{"output":{"ok":true},"receipt":"sha256:read"}}`},
+		{Role: "assistant", ReasoningContent: "I should find the private deleted preference before changing it.", ToolCalls: []ToolCall{{ID: "memory-search", Name: "memory", Arguments: json.RawMessage(`{"operation":"search","query":"private preference"}`)}}},
+		{Role: "tool", ToolCallID: "memory-search", Content: string(observation)},
+		{Role: "assistant", ReasoningContent: "The private deleted preference must now be removed.", ToolCalls: []ToolCall{{ID: "memory-forget", Name: "memory", Arguments: json.RawMessage(`{"operation":"forget","memory_id":"memory-delete"}`)}}},
+		{Role: "tool", ToolCallID: "memory-forget", Content: `{"success":true,"result":{"output":{"memory_id":"memory-delete"}},"status":"confirmed"}`},
+	}}
+	state := loopState{ContextManifest: execution.ContextManifest{
+		MemoryToolRetrievalIDs: []string{"retrieval-tool"},
+		MemoryBindings:         []execution.MemoryBinding{{RetrievalID: "retrieval-tool", MemoryID: "memory-delete", ClaimID: "claim-delete"}},
+	}, PendingMemoryMutations: []pendingMemoryMutation{{Operation: "forget", TargetID: "memory-delete", Receipt: "sha256:forget", Status: "confirmed"}}}
+	contentStore, err := content.New(t.TempDir(), []byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{identity: identity.Snapshot{Soul: "stable soul"}, repository: &loopTestRepository{}, content: contentStore}
+	if err := service.finalizePendingMemoryMutations(context.Background(), TaskContext{TaskID: "task", RunID: "run", ExecutionID: "execution"}, &request, map[string]string{"memory": "builtin.memory", "files": "builtin.files"}, &state); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateModelTranscript(request.Messages); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(traceWithProviderTranscript(runTrace{}, request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "private deleted preference") || strings.Contains(string(encoded), "exact untouched provider reasoning") || !strings.Contains(string(encoded), "memory.mutated") || !strings.Contains(string(encoded), "tool.receipt") || !strings.Contains(string(encoded), "sha256:read") {
+		t.Fatalf("forgotten Memory survived the provider transcript: %s", encoded)
+	}
+	carried, err := json.Marshal(carriedProviderMessages(request.Messages))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(carried), "private deleted preference") || strings.Contains(string(carried), "exact untouched provider reasoning") || strings.Contains(string(carried), "Memory-specific reasoning redacted") || !strings.Contains(string(carried), "sha256:read") {
+		t.Fatalf("forgotten Memory survived cross-Run carry: %s", carried)
+	}
+	if len(state.ContextManifest.MemoryBindings) != 0 {
+		t.Fatalf("forgotten Memory binding survived: %+v", state.ContextManifest.MemoryBindings)
+	}
+}
+
+func TestConfirmedMemoryForgetSanitizesReasoningAfterVolatileMemoryWasDroppedOnCarry(t *testing.T) {
+	firstRun := []Message{
+		{Role: "system", Content: "<relevant_memory>private carried preference</relevant_memory>"},
+		{Role: "user", Content: "Prepare the notes."},
+		{Role: "assistant", ReasoningContent: "The private carried preference changes how I should read this file.", ToolCalls: []ToolCall{{ID: "read-notes", Name: "files", Arguments: json.RawMessage(`{"operation":"read","path":"notes.txt"}`)}}},
+		{Role: "tool", ToolCallID: "read-notes", Content: `{"success":true,"intent_id":"intent-notes","status":"confirmed","tool_id":"files","result":{"receipt":"sha256:notes","output":{"ok":true}}}`},
+	}
+	carried := carriedProviderMessages(firstRun)
+	for _, message := range carried {
+		if strings.Contains(message.Content, "<relevant_memory>") {
+			t.Fatal("volatile Memory overlay unexpectedly survived ordinary carry")
+		}
+	}
+	request := ModelRequest{Messages: append(carried,
+		Message{Role: "user", Content: "Forget that stored preference."},
+		Message{Role: "assistant", ReasoningContent: "I should forget it now.", ToolCalls: []ToolCall{{ID: "forget-memory", Name: "memory", Arguments: json.RawMessage(`{"operation":"forget","memory_id":"memory-delete"}`)}}},
+		Message{Role: "tool", ToolCallID: "forget-memory", Content: `{"success":true,"status":"confirmed","result":{"receipt":"sha256:forget","output":{"memory_id":"memory-delete"}}}`},
+	)}
+	state := loopState{
+		TaskText:               "Forget that stored preference.",
+		PendingMemoryMutations: []pendingMemoryMutation{{Operation: "forget", TargetID: "memory-delete", Receipt: "sha256:forget", Status: "confirmed"}},
+	}
+	contentStore, err := content.New(t.TempDir(), []byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{repository: &loopTestRepository{}, content: contentStore}
+	if err := service.finalizePendingMemoryMutations(context.Background(), TaskContext{TaskID: "task", RunID: "run", ExecutionID: "execution"}, &request, map[string]string{"memory": "builtin.memory", "files": "builtin.files"}, &state); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(request.Messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "private carried preference") || !strings.Contains(string(encoded), "sha256:notes") || !strings.Contains(string(encoded), "memory.mutated") {
+		t.Fatalf("carried Memory exposure survived forget sanitation: %s", encoded)
+	}
+	receiptIndex, forgetIndex, mutationIndex := -1, -1, -1
+	for index, message := range request.Messages {
+		if strings.Contains(message.Content, "sha256:notes") {
+			receiptIndex = index
+		}
+		if message.Content == "Forget that stored preference." {
+			forgetIndex = index
+		}
+		if strings.Contains(message.Content, `type="memory.mutated"`) {
+			mutationIndex = index
+		}
+	}
+	if receiptIndex < 0 || forgetIndex < 0 || mutationIndex < 0 || !(receiptIndex < forgetIndex && forgetIndex < mutationIndex) {
+		t.Fatalf("sanitized receipt chronology=%d forget=%d mutation=%d messages=%+v", receiptIndex, forgetIndex, mutationIndex, request.Messages)
+	}
+}
+
+func TestUncertainMemoryMutationStillInvalidatesActiveMemoryContextWithoutClaimingSuccess(t *testing.T) {
+	request := ModelRequest{Messages: []Message{
+		{Role: "system", Content: "<relevant_memory>private uncertain preference</relevant_memory>"},
+		{Role: "user", Content: "Forget that preference."},
+		{Role: "assistant", ReasoningContent: "private uncertain preference", ToolCalls: []ToolCall{{ID: "forget", Name: "memory", Arguments: json.RawMessage(`{"operation":"forget","memory_id":"memory-uncertain"}`)}}},
+		{Role: "tool", ToolCallID: "forget", Content: `{"success":false,"status":"unknown"}`},
+	}}
+	state := loopState{
+		TaskText:               "Forget that preference.",
+		PendingMemoryMutations: []pendingMemoryMutation{{Operation: "forget", TargetID: "memory-uncertain", Status: "uncertain", IntentID: "intent-uncertain"}},
+	}
+	contentStore, err := content.New(t.TempDir(), []byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{repository: &loopTestRepository{}, content: contentStore}
+	if err := service.finalizePendingMemoryMutations(context.Background(), TaskContext{TaskID: "task", RunID: "run", ExecutionID: "execution"}, &request, map[string]string{"memory": "builtin.memory"}, &state); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(request.Messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "private uncertain preference") || !strings.Contains(string(encoded), `type=\"memory.mutation_uncertain\"`) || strings.Contains(string(encoded), `type=\"memory.mutated\"`) {
+		t.Fatalf("uncertain mutation context=%s", encoded)
+	}
 }
 
 type progressCapturingJudge struct{ requests []JudgeRequest }

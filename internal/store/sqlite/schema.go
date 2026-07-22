@@ -252,6 +252,7 @@ var schemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS memory_items (
 		id TEXT PRIMARY KEY,
 		claim_id TEXT NOT NULL UNIQUE REFERENCES memory_claims(id),
+		replaces_memory_id TEXT,
 		kind TEXT NOT NULL,
 		scope TEXT NOT NULL,
 		salience REAL NOT NULL,
@@ -264,6 +265,8 @@ var schemaStatements = []string{
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL
 	)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS memory_items_replaces
+		ON memory_items(replaces_memory_id) WHERE replaces_memory_id IS NOT NULL`,
 	`CREATE INDEX IF NOT EXISTS memory_items_retrieval ON memory_items(status, usage_policy, updated_at)`,
 	`CREATE TABLE IF NOT EXISTS memory_terms (
 		memory_id TEXT NOT NULL REFERENCES memory_items(id),
@@ -319,7 +322,8 @@ var schemaStatements = []string{
 	)`,
 	`CREATE TABLE IF NOT EXISTS commitments (
 		id TEXT PRIMARY KEY,
-		message_ref_json TEXT NOT NULL,
+		source_task_id TEXT NOT NULL REFERENCES tasks(id),
+		task_ref_json TEXT NOT NULL,
 		schedule_json TEXT NOT NULL,
 		importance TEXT NOT NULL CHECK(importance IN ('normal', 'important')),
 		status TEXT NOT NULL CHECK(status IN ('active', 'paused', 'completed', 'canceled')),

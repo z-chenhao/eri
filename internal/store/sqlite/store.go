@@ -52,6 +52,8 @@ var authoritativeSchemaRequirements = []schemaRequirement{
 	{table: "conversation_introductions", columns: []string{"conversation_id", "task_id", "requested_at"}},
 	{table: "channel_messages", columns: []string{"channel", "external_message_id", "interaction_id", "external_conversation_id", "external_sender_id", "reply_to_external_message_id", "direction", "external_created_at"}},
 	{table: "commitment_fires", columns: []string{"target_channel", "target_conversation_id", "reply_to_message_id", "routing_mode"}},
+	{table: "commitments", columns: []string{"source_task_id", "task_ref_json"}},
+	{table: "memory_items", columns: []string{"replaces_memory_id"}},
 	{table: "memory_semantic_index", columns: []string{"memory_id", "model_id", "content_hash", "vector_ref_json"}},
 }
 
@@ -685,15 +687,16 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 	err = tx.QueryRowContext(ctx, `
 		SELECT t.status, COALESCE(t.lease_until, ''), t.source_channel, t.conversation_id,
 			t.source_interaction_id, source.kind, source.role, source.channel, source.content_ref_json,
-			COALESCE(f.commitment_id, ''), COALESCE(f.scheduled_for, '')
+			COALESCE(f.commitment_id, ''), COALESCE(f.scheduled_for, ''), COALESCE(c.importance, '')
 		FROM tasks t
 		JOIN interactions source ON source.id = t.source_interaction_id
 		LEFT JOIN commitment_fires f ON f.task_id = t.id
+		LEFT JOIN commitments c ON c.id = f.commitment_id
 		WHERE t.id = ?`, taskID).Scan(
 		&currentStatus, &leaseUntil, &sourceChannel, &conversationID,
 		&currentTask.SourceInteractionID, &currentTask.SourceKind, &currentTask.SourceRole,
 		&currentTask.TriggerChannel, &objectiveRefJSON,
-		&currentTask.CommitmentID, &scheduledFor,
+		&currentTask.CommitmentID, &scheduledFor, &currentTask.Importance,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return agent.TaskContext{}, false, nil
@@ -765,22 +768,22 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 	firstSequence := int64(0)
 	var checkpointID, checkpointRefJSON string
 	var reversed []agent.ContextRecord
-	if currentTask.ExecutionPhase != execution.TaskPhaseFulfillment {
-		err = tx.QueryRowContext(ctx, `
-			SELECT id, summary_ref_json, first_kept_sequence
-			FROM context_checkpoints ORDER BY created_at DESC LIMIT 1`).Scan(&checkpointID, &checkpointRefJSON, &firstSequence)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	err = tx.QueryRowContext(ctx, `
+		SELECT id, summary_ref_json, first_kept_sequence
+		FROM context_checkpoints
+		WHERE first_kept_sequence <= (SELECT sequence FROM interactions WHERE id = ?)
+		ORDER BY created_at DESC LIMIT 1`, currentTask.SourceInteractionID).Scan(&checkpointID, &checkpointRefJSON, &firstSequence)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return agent.TaskContext{}, false, err
+	}
+	if err == nil {
+		var checkpointRef content.Ref
+		if err := json.Unmarshal([]byte(checkpointRefJSON), &checkpointRef); err != nil {
 			return agent.TaskContext{}, false, err
 		}
-		if err == nil {
-			var checkpointRef content.Ref
-			if err := json.Unmarshal([]byte(checkpointRefJSON), &checkpointRef); err != nil {
-				return agent.TaskContext{}, false, err
-			}
-			reversed = append(reversed, agent.ContextRecord{
-				ID: checkpointID, Kind: "context_checkpoint", Role: "system", ContentRef: checkpointRef,
-			})
-		}
+		reversed = append(reversed, agent.ContextRecord{
+			ID: checkpointID, Kind: "context_checkpoint", Role: "system", Sequence: firstSequence, ContentRef: checkpointRef,
+		})
 	}
 	messageQuery := `
 		SELECT sequence, id, task_id, COALESCE(delivery_id, ''), kind, role, content_ref_json FROM interactions
@@ -789,12 +792,6 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 			AND (kind != 'internal_trigger' OR id = (SELECT source_interaction_id FROM tasks WHERE id = ?))
 		ORDER BY sequence DESC`
 	messageArgs := []any{channel.ConversationID, firstSequence, taskID}
-	if currentTask.ExecutionPhase == execution.TaskPhaseFulfillment {
-		messageQuery = `
-			SELECT sequence, id, task_id, COALESCE(delivery_id, ''), kind, role, content_ref_json FROM interactions
-			WHERE conversation_id = ? AND id = ? ORDER BY sequence DESC`
-		messageArgs = []any{channel.ConversationID, currentTask.SourceInteractionID}
-	}
 	rows, err := tx.QueryContext(ctx, messageQuery, messageArgs...)
 	if err != nil {
 		return agent.TaskContext{}, false, err
@@ -814,6 +811,35 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 	}
 	if err := rows.Close(); err != nil {
 		return agent.TaskContext{}, false, err
+	}
+	var priorTranscriptRef content.Ref
+	var priorTranscriptRefJSON string
+	var priorTranscriptSequence int64
+	err = tx.QueryRowContext(ctx, `
+		SELECT a.trace_ref_json, prior.sequence
+		FROM interactions source
+		JOIN interactions prior ON prior.conversation_id = source.conversation_id
+		JOIN artifacts a ON a.id = prior.artifact_id
+		JOIN runs prior_run ON prior_run.id = a.run_id
+		JOIN deliveries d ON d.id = prior.delivery_id
+		WHERE source.id = ? AND prior.sequence < source.sequence
+			AND prior.direction = 'outbound' AND prior.role = 'assistant'
+			AND a.status = 'delivered' AND a.kind != 'progress' AND d.continue_task = 0
+			AND prior_run.target = ?
+			AND prior.sequence = (
+				SELECT MAX(previous.sequence) FROM interactions previous
+				WHERE previous.conversation_id = source.conversation_id
+					AND previous.sequence < source.sequence
+			)
+		ORDER BY prior.sequence DESC LIMIT 1`, currentTask.SourceInteractionID, modelTarget).
+		Scan(&priorTranscriptRefJSON, &priorTranscriptSequence)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return agent.TaskContext{}, false, err
+	}
+	if err == nil {
+		if err := json.Unmarshal([]byte(priorTranscriptRefJSON), &priorTranscriptRef); err != nil {
+			return agent.TaskContext{}, false, fmt.Errorf("decode prior provider transcript ref: %w", err)
+		}
 	}
 	messages := make([]agent.ContextRecord, 0, len(reversed))
 	if checkpointID != "" {
@@ -867,6 +893,7 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 	return agent.TaskContext{
 		TaskID: taskID, RunID: runID, SourceChannel: sourceChannel,
 		InputSequence: inputSequence, ConversationSequence: conversationSequence, Messages: messages,
+		PriorTranscriptRef: priorTranscriptRef, PriorTranscriptSequence: priorTranscriptSequence,
 		CheckpointRef: agentCheckpointRef, CheckpointPhase: checkpointPhase,
 		CurrentTask: currentTask, ObjectiveRef: objectiveRef,
 	}, true, nil
@@ -1152,6 +1179,15 @@ func (s *Store) CommitArtifact(ctx context.Context, commit agent.Commit) error {
 	}
 	if existing > 0 {
 		return nil
+	}
+	// Only Memory that the independent Judge identified as materially applied
+	// is reinforced, and only inside the same transaction that accepts the
+	// evaluated artifact. A stale or failed delivery candidate cannot mutate
+	// Memory usage state.
+	for _, use := range commit.AppliedMemoryUses {
+		if err := recordMemoryUseTx(ctx, tx, use.RetrievalID, use.MemoryIDs, now); err != nil {
+			return err
+		}
 	}
 	modelStatus := "succeeded"
 	runEvent := "run.succeeded"

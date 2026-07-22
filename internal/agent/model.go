@@ -138,6 +138,10 @@ func buildToolDefinitions(descriptors []tool.Descriptor) ([]ToolDefinition, map[
 }
 
 func modelToolName(id string) string {
+	if id == "builtin.commitments" {
+		return "schedule"
+	}
+	id = strings.TrimPrefix(id, "builtin.")
 	var b strings.Builder
 	for _, r := range id {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' {

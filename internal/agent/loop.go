@@ -14,6 +14,7 @@ import (
 	"github.com/z-chenhao/eri/internal/budget"
 	"github.com/z-chenhao/eri/internal/eval"
 	"github.com/z-chenhao/eri/internal/execution"
+	"github.com/z-chenhao/eri/internal/memory"
 	"github.com/z-chenhao/eri/internal/observability"
 	"github.com/z-chenhao/eri/internal/tool"
 )
@@ -183,17 +184,23 @@ func runAgentLoop(ctx context.Context, driver loopDriver, task TaskContext, requ
 		assistantIndex := len(request.Messages)
 		request.Messages = append(request.Messages, response.Message)
 		if driver.refresh != nil {
+			// Keep the just-produced assistant message out of refresh assembly.
+			// Joined input may remove older transient overlays, so an index captured
+			// before refresh is not stable.
+			assistantMessage := request.Messages[len(request.Messages)-1]
+			request.Messages = request.Messages[:len(request.Messages)-1]
 			changed, err := driver.refresh(ctx, task, &request, &state)
 			if err != nil {
 				return driver.fail(ctx, task, request, state.Usage, "task_input_unavailable", state.Trace)
 			}
 			if changed {
-				removeMessageAt(&request, assistantIndex)
 				markLatestTurnSuperseded(&state)
 				driver.logger.Info("model result superseded by newer user input", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "execution_id", task.ExecutionKey(), "turn", turnOrdinal, "input_sequence", state.InputSequence)
 				state.NextTurnTrigger = "user_input"
 				continue
 			}
+			request.Messages = append(request.Messages, assistantMessage)
+			assistantIndex = len(request.Messages) - 1
 		}
 		if len(response.Message.ToolCalls) == 0 {
 			appendCompletedTurnCheckpoint(&state, "candidate_received")
@@ -252,6 +259,7 @@ func runAgentLoop(ctx context.Context, driver loopDriver, task TaskContext, requ
 				return driver.fail(ctx, task, request, state.Usage, "task_input_unavailable", state.Trace)
 			}
 			if changed {
+				assistantIndex = findAssistantToolFrameIndex(request.Messages, response.Message.ToolCalls)
 				if _, err := closeInterruptedToolFrame(&request, assistantIndex, modelToolIDs, &state); err != nil {
 					return driver.fail(ctx, task, request, state.Usage, "invalid_model_transcript", state.Trace)
 				}
@@ -264,10 +272,12 @@ func runAgentLoop(ctx context.Context, driver loopDriver, task TaskContext, requ
 				}
 				continue
 			}
+			assistantIndex = findAssistantToolFrameIndex(request.Messages, response.Message.ToolCalls)
 		}
 		observationStart := len(request.Messages)
 		paused, err := driver.execute(ctx, task, &request, response.Message.ToolCalls, modelToolIDs, &state, nil)
 		if errors.Is(err, ErrStaleTaskInput) || errors.Is(err, ErrStaleConversationContext) {
+			assistantIndex = findAssistantToolFrameIndex(request.Messages, response.Message.ToolCalls)
 			retained, closeErr := closeInterruptedToolFrame(&request, assistantIndex, modelToolIDs, &state)
 			if closeErr != nil {
 				return driver.fail(ctx, task, request, state.Usage, "invalid_model_transcript", state.Trace)
@@ -293,7 +303,11 @@ func runAgentLoop(ctx context.Context, driver loopDriver, task TaskContext, requ
 				driver.logger.Warn("progress message was withheld", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "execution_id", task.ExecutionKey(), "turn", turnOrdinal, "error_code", observability.ErrorCode(err), "error", observability.SafeError(err))
 			}
 		}
-		stagnant := updateLoopProgress(&state, response.Message.ToolCalls, request.Messages[observationStart:])
+		observations := []Message(nil)
+		if observationStart < len(request.Messages) {
+			observations = request.Messages[observationStart:]
+		}
+		stagnant := updateLoopProgress(&state, response.Message.ToolCalls, observations)
 		if stagnant >= 4 {
 			if state.ConfirmedEffects > 0 && !state.SynthesisOnly {
 				request.Tools = nil
@@ -327,11 +341,24 @@ func markLatestTurnSuperseded(state *loopState) {
 	}
 }
 
-func removeMessageAt(request *ModelRequest, index int) {
-	if index < 0 || index >= len(request.Messages) {
-		return
+func findAssistantToolFrameIndex(messages []Message, calls []ToolCall) int {
+	for index := len(messages) - 1; index >= 0; index-- {
+		message := messages[index]
+		if message.Role != "assistant" || len(message.ToolCalls) != len(calls) {
+			continue
+		}
+		matched := true
+		for callIndex := range calls {
+			if message.ToolCalls[callIndex].ID != calls[callIndex].ID || message.ToolCalls[callIndex].Name != calls[callIndex].Name {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return index
+		}
 	}
-	request.Messages = append(request.Messages[:index], request.Messages[index+1:]...)
+	return -1
 }
 
 // closeInterruptedToolFrame preserves the provider protocol when newer user
@@ -524,14 +551,17 @@ func (s *Service) evaluateAndCommitCandidate(
 	modelToolIDs map[string]string,
 	state *loopState,
 ) (ModelRequest, bool, error) {
-	candidateIndex := len(request.Messages) - 1
+	if len(request.Messages) == 0 || request.Messages[len(request.Messages)-1].Role != "assistant" || len(request.Messages[len(request.Messages)-1].ToolCalls) != 0 {
+		return request, false, fmt.Errorf("candidate boundary requires one final assistant message")
+	}
+	candidate := request.Messages[len(request.Messages)-1]
+	request.Messages = request.Messages[:len(request.Messages)-1]
 	findingsStart := len(state.EvalFindings)
 	changed, err := s.refreshTaskInputs(ctx, task, &request, state)
 	if err != nil {
 		return request, false, err
 	}
 	if changed {
-		removeMessageAt(&request, candidateIndex)
 		markLatestTurnSuperseded(state)
 		s.logger.Info("candidate superseded before Eval", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "execution_id", task.ExecutionKey(), "input_sequence", state.InputSequence)
 		state.NextTurnTrigger = "user_input"
@@ -542,13 +572,13 @@ func (s *Service) evaluateAndCommitCandidate(
 		return request, false, err
 	}
 	if conversationChanged {
-		removeMessageAt(&request, candidateIndex)
 		markLatestTurnSuperseded(state)
 		s.logger.Info("candidate superseded by newer Conversation context before Eval", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "execution_id", task.ExecutionKey(), "conversation_sequence", state.ConversationSequence)
 		state.NextTurnTrigger = "conversation_update"
 		return request, true, nil
 	}
-	body := strings.TrimSpace(request.Messages[len(request.Messages)-1].Content)
+	request.Messages = append(request.Messages, candidate)
+	body := strings.TrimSpace(candidate.Content)
 	evaluationStartedAt := time.Now().UTC()
 	modelTurnID := latestModelTurnID(state)
 	evaluationAttempt := state.EvalAttempts + 1
@@ -562,6 +592,7 @@ func (s *Service) evaluateAndCommitCandidate(
 	decision, judgeUsage, judgeErr := s.evaluateCandidate(ctx, task.TaskID, JudgeRequest{
 		CandidateContext: state.JudgeContext, Messages: request.Messages, TaskText: state.TaskText,
 		SkillIDs: state.SkillIDs, ConfirmedTools: confirmedTools, MaxOutputTokens: s.loop.MaxOutputTokens,
+		MemoryClaimIDs:     judgeMemoryClaimIDs(state.ContextManifest),
 		SoulGuidedResponse: true,
 	})
 	state.Usage = mergeUsage(state.Usage, judgeUsage)
@@ -574,12 +605,12 @@ func (s *Service) evaluateAndCommitCandidate(
 		}
 		return request, false, s.commitFailure(ctx, task, state.Usage, "llm_judge_unavailable", trace)
 	}
+	request.Messages = request.Messages[:len(request.Messages)-1]
 	changed, err = s.refreshTaskInputs(ctx, task, &request, state)
 	if err != nil {
 		return request, false, err
 	}
 	if changed {
-		removeMessageAt(&request, candidateIndex)
 		markLatestTurnSuperseded(state)
 		s.logger.Info("candidate superseded during Eval", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "execution_id", task.ExecutionKey(), "input_sequence", state.InputSequence)
 		state.NextTurnTrigger = "user_input"
@@ -590,12 +621,12 @@ func (s *Service) evaluateAndCommitCandidate(
 		return request, false, err
 	}
 	if conversationChanged {
-		removeMessageAt(&request, candidateIndex)
 		markLatestTurnSuperseded(state)
 		s.logger.Info("candidate superseded by newer Conversation context during Eval", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "execution_id", task.ExecutionKey(), "conversation_sequence", state.ConversationSequence)
 		state.NextTurnTrigger = "conversation_update"
 		return request, true, nil
 	}
+	request.Messages = append(request.Messages, candidate)
 	state.EvalAttempts++
 	state.Trace.Evaluations = append(state.Trace.Evaluations, evaluationTrace{
 		ID: modelTurnID + ":eval:" + strconv.Itoa(evaluationAttempt), ModelTurnID: modelTurnID, Attempt: evaluationAttempt,
@@ -631,8 +662,13 @@ func (s *Service) evaluateAndCommitCandidate(
 	if state.PendingDeferred != nil {
 		return request, false, s.pauseForSubagent(ctx, task, *state, request, modelToolIDs, body, decision.Tier)
 	}
-	err = s.commitEvaluatedReply(ctx, task, traceWithProviderTranscript(state.Trace, request), state.Usage, body, "text", decision.Tier, state.EvalFindings, state.Attachments, state.InputSequence, state.ConversationSequence)
+	appliedMemoryUses, err := resolveAppliedMemoryUses(state.ContextManifest, decision.AppliedMemoryClaims)
+	if err != nil {
+		return request, false, s.commitFailure(ctx, task, state.Usage, "llm_judge_invalid_memory_use", traceWithProviderTranscript(state.Trace, request))
+	}
+	err = s.commitEvaluatedReply(ctx, task, traceWithProviderTranscript(state.Trace, request), state.Usage, body, "text", decision.Tier, state.EvalFindings, state.Attachments, state.InputSequence, state.ConversationSequence, appliedMemoryUses)
 	if errors.Is(err, ErrStaleTaskInput) {
+		request.Messages = request.Messages[:len(request.Messages)-1]
 		changed, refreshErr := s.refreshTaskInputs(ctx, task, &request, state)
 		if refreshErr != nil {
 			return request, false, refreshErr
@@ -642,14 +678,15 @@ func (s *Service) evaluateAndCommitCandidate(
 				state.EvalAttempts--
 			}
 			state.EvalFindings = state.EvalFindings[:findingsStart]
-			removeMessageAt(&request, candidateIndex)
 			markLatestTurnSuperseded(state)
 			s.logger.Info("candidate superseded at durable commit fence", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "execution_id", task.ExecutionKey(), "input_sequence", state.InputSequence)
 			state.NextTurnTrigger = "user_input"
 			return request, true, nil
 		}
+		request.Messages = append(request.Messages, candidate)
 	}
 	if errors.Is(err, ErrStaleConversationContext) {
+		request.Messages = request.Messages[:len(request.Messages)-1]
 		changed, refreshErr := s.refreshConversationUpdates(ctx, task, &request, state)
 		if refreshErr != nil {
 			return request, false, refreshErr
@@ -659,14 +696,85 @@ func (s *Service) evaluateAndCommitCandidate(
 				state.EvalAttempts--
 			}
 			state.EvalFindings = state.EvalFindings[:findingsStart]
-			removeMessageAt(&request, candidateIndex)
 			markLatestTurnSuperseded(state)
 			s.logger.Info("candidate superseded at Conversation commit fence", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "execution_id", task.ExecutionKey(), "conversation_sequence", state.ConversationSequence)
 			state.NextTurnTrigger = "conversation_update"
 			return request, true, nil
 		}
+		request.Messages = append(request.Messages, candidate)
 	}
 	return request, false, err
+}
+
+func judgeMemoryClaimIDs(manifest execution.ContextManifest) []string {
+	claims := make([]string, 0, len(manifest.MemoryBindings))
+	for _, binding := range manifest.MemoryBindings {
+		appendUnique(&claims, binding.ClaimID)
+	}
+	if len(claims) == 0 {
+		for _, claimID := range manifest.MemoryClaimIDs {
+			appendUnique(&claims, claimID)
+		}
+	}
+	return claims
+}
+
+func resolveAppliedMemoryUses(manifest execution.ContextManifest, appliedClaims []string) ([]MemoryUse, error) {
+	if len(appliedClaims) == 0 {
+		return nil, nil
+	}
+	bindings := append([]execution.MemoryBinding(nil), manifest.MemoryBindings...)
+	if len(bindings) == 0 && manifest.MemoryRetrievalID != "" && len(manifest.MemoryIDs) == len(manifest.MemoryClaimIDs) {
+		for index, claimID := range manifest.MemoryClaimIDs {
+			bindings = append(bindings, execution.MemoryBinding{
+				RetrievalID: manifest.MemoryRetrievalID, MemoryID: manifest.MemoryIDs[index], ClaimID: claimID,
+			})
+		}
+	}
+	if len(bindings) == 0 {
+		return nil, fmt.Errorf("applied Memory lacks a complete retrieval manifest")
+	}
+	byClaim := make(map[string][]execution.MemoryBinding, len(bindings))
+	for _, binding := range bindings {
+		binding.ClaimID = strings.TrimSpace(binding.ClaimID)
+		binding.MemoryID = strings.TrimSpace(binding.MemoryID)
+		binding.RetrievalID = strings.TrimSpace(binding.RetrievalID)
+		if binding.ClaimID == "" || binding.MemoryID == "" || binding.RetrievalID == "" {
+			return nil, fmt.Errorf("Memory retrieval manifest contains an empty identity")
+		}
+		claimBindings := byClaim[binding.ClaimID]
+		duplicate := false
+		for _, existing := range claimBindings {
+			if existing.RetrievalID == binding.RetrievalID && existing.MemoryID == binding.MemoryID {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			byClaim[binding.ClaimID] = append(claimBindings, binding)
+		}
+	}
+	byRetrieval := make(map[string][]string)
+	retrievalOrder := make([]string, 0)
+	for _, claimID := range appliedClaims {
+		claimBindings, ok := byClaim[strings.TrimSpace(claimID)]
+		if !ok {
+			return nil, fmt.Errorf("Judge applied unknown Memory claim %q", claimID)
+		}
+		for _, binding := range claimBindings {
+			if _, exists := byRetrieval[binding.RetrievalID]; !exists {
+				retrievalOrder = append(retrievalOrder, binding.RetrievalID)
+			}
+			memoryIDs := byRetrieval[binding.RetrievalID]
+			appendUnique(&memoryIDs, binding.MemoryID)
+			byRetrieval[binding.RetrievalID] = memoryIDs
+		}
+	}
+	uses := make([]MemoryUse, 0, len(retrievalOrder))
+	for _, retrievalID := range retrievalOrder {
+		uses = append(uses, MemoryUse{RetrievalID: retrievalID, MemoryIDs: byRetrieval[retrievalID]})
+	}
+	return uses, nil
 }
 
 func findLoopCut(messages []Message, keepTokens int) int {
@@ -684,6 +792,47 @@ func findLoopCut(messages []Message, keepTokens int) int {
 	return -1
 }
 
+func latestUserTurnIndex(messages []Message) int {
+	for index := len(messages) - 1; index >= 0; index-- {
+		if messages[index].Role == "user" {
+			return index
+		}
+	}
+	return -1
+}
+
+func protectedSourceIndex(messages []Message, state *loopState) int {
+	if state != nil && state.ProtectedSourceMessage > 0 {
+		index := state.ProtectedSourceMessage - 1
+		if index >= 0 && index < len(messages) && (messages[index].Role == "user" || messages[index].Role == "system") {
+			if taskText := strings.TrimSpace(state.TaskText); taskText == "" || strings.TrimSpace(messages[index].Content) == taskText {
+				return index
+			}
+		}
+	}
+	if state != nil {
+		taskText := strings.TrimSpace(state.TaskText)
+		if taskText != "" {
+			for index := len(messages) - 1; index >= 0; index-- {
+				if (messages[index].Role == "user" || messages[index].Role == "system") && strings.TrimSpace(messages[index].Content) == taskText {
+					return index
+				}
+			}
+		}
+	}
+	return latestUserTurnIndex(messages)
+}
+
+func protectedContextStart(messages []Message, sourceIndex int) int {
+	if sourceIndex > 0 && sourceIndex < len(messages) {
+		previous := messages[sourceIndex-1]
+		if previous.Role == "system" && strings.HasPrefix(strings.TrimSpace(previous.Content), "<relevant_memory>") {
+			return sourceIndex - 1
+		}
+	}
+	return sourceIndex
+}
+
 func (s *Service) compactLoopContext(
 	ctx context.Context,
 	task TaskContext,
@@ -691,23 +840,55 @@ func (s *Service) compactLoopContext(
 	capabilities ModelCapabilities,
 	state *loopState,
 ) (ModelRequest, Usage, error) {
+	if len(request.Messages) == 0 {
+		limit := contextInputLimit(capabilities, request.MaxOutputTokens)
+		return request, Usage{}, fmt.Errorf("context exceeds %d tokens without messages to compact", limit)
+	}
+	protectedSource := protectedSourceIndex(request.Messages, state)
+	if protectedSource < 0 {
+		limit := contextInputLimit(capabilities, request.MaxOutputTokens)
+		return request, Usage{}, fmt.Errorf("context exceeds %d tokens without a current source turn to preserve", limit)
+	}
+	protectedStart := protectedContextStart(request.Messages, protectedSource)
+	// A newer joined source can leave Memory or Runtime feedback from the old
+	// decision point earlier in the transcript. Remove those transient overlays
+	// before either the Agent or the checkpoint summarizer can consume them.
+	filtered := make([]Message, 0, len(request.Messages))
+	removedBeforeSource := 0
+	for index, message := range request.Messages {
+		if index < protectedStart && isTransientSystemOverlay(message) {
+			removedBeforeSource++
+			continue
+		}
+		filtered = append(filtered, message)
+	}
+	request.Messages = filtered
+	protectedSource -= removedBeforeSource
+	protectedStart -= removedBeforeSource
+	state.ProtectedSourceMessage = protectedSource + 1
+
 	before := estimateModelInputTokens(request)
 	limit := contextInputLimit(capabilities, request.MaxOutputTokens)
 	if before <= limit {
 		return request, Usage{}, nil
-	}
-	if len(request.Messages) == 0 {
-		return request, Usage{}, fmt.Errorf("context exceeds %d tokens without messages to compact", limit)
 	}
 	keepTokens := defaultRecentTokens
 	if keepTokens > limit/2 {
 		keepTokens = limit / 2
 	}
 	cut := findLoopCut(request.Messages, keepTokens)
-	if cut <= 0 {
-		cut = len(request.Messages)
+	if cut <= 0 || cut > protectedStart {
+		// The current source turn, including a trusted system_reminder, is the
+		// authoritative cause of this Run. Its immediately preceding dynamic
+		// Memory selection is part of the protected suffix as well: summarizing
+		// it would make deleted or replaced Memory survive into later Runs.
+		cut = protectedStart
 	}
-	summary, usage, err := s.summarizeContext(ctx, task.TaskID, request.Messages[:cut], capabilities)
+	if cut <= 0 {
+		return request, Usage{}, fmt.Errorf("current source turn and relevant Memory exceed the %d-token input limit and cannot be summarized", limit)
+	}
+	originalProtectedStart := protectedStart
+	summary, usage, err := s.summarizeContext(ctx, task.TaskID, durableSummaryMessages(request.Messages[:cut]), capabilities)
 	if err != nil {
 		return request, usage, err
 	}
@@ -716,19 +897,33 @@ func (s *Service) compactLoopContext(
 		Content: "Eri in-run context checkpoint. It summarizes prior native model/tool turns; continue the same task from it.\n\n" + summary,
 	}
 	request.Messages = append([]Message{checkpoint}, request.Messages[cut:]...)
+	protectedSource = 1 + protectedSource - cut
+	protectedStart = protectedContextStart(request.Messages, protectedSource)
 	after := estimateModelInputTokens(request)
-	if after > limit && len(request.Messages) > 1 {
-		summary, nextUsage, err := s.summarizeContext(ctx, task.TaskID, request.Messages, capabilities)
+	if after > limit && protectedStart > 1 {
+		// The first pass preserves a recent closed prefix for continuity. If
+		// that is still too large, fold only the remaining history before the
+		// protected suffix into a second checkpoint. Dynamic Memory, the current
+		// user turn, and subsequent native Tool frames remain byte-for-byte
+		// messages.
+		summary, nextUsage, err := s.summarizeContext(ctx, task.TaskID, durableSummaryMessages(request.Messages[:protectedStart]), capabilities)
 		usage = mergeUsage(usage, nextUsage)
 		if err != nil {
 			return request, usage, err
 		}
-		request.Messages = []Message{{Role: "system", Content: "Eri in-run context checkpoint.\n\n" + summary}}
+		request.Messages = append([]Message{{
+			Role:    "system",
+			Content: "Eri in-run context checkpoint. It summarizes prior closed history; continue the same task from the preserved user turn.\n\n" + summary,
+		}}, request.Messages[protectedStart:]...)
+		protectedSource = 1 + protectedSource - protectedStart
+		protectedStart = protectedContextStart(request.Messages, protectedSource)
 		after = estimateModelInputTokens(request)
+		cut = originalProtectedStart
 	}
 	if after > limit {
-		return request, usage, fmt.Errorf("in-run context remains over limit: %d > %d", after, limit)
+		return request, usage, fmt.Errorf("current source turn and subsequent native Tool frames remain over limit after safe compaction: %d > %d", after, limit)
 	}
+	state.ProtectedSourceMessage = protectedSource + 1
 	state.ContextManifest.RuntimeCompactions = append(state.ContextManifest.RuntimeCompactions, execution.RuntimeCompaction{
 		TokensBefore: before, TokensAfter: after, SummarizedMessages: cut,
 	})
@@ -753,6 +948,9 @@ func evalRepairInstruction(decision eval.Decision) string {
 }
 
 func evalRepairRequest(request ModelRequest, decision eval.Decision) ModelRequest {
+	if len(request.Messages) > 0 && request.Messages[len(request.Messages)-1].Role == "assistant" && len(request.Messages[len(request.Messages)-1].ToolCalls) == 0 {
+		request.Messages = append([]Message(nil), request.Messages[:len(request.Messages)-1]...)
+	}
 	request.Messages = replaceSystemOverlay(request.Messages, "evaluation_feedback", evalRepairInstruction(decision))
 	if decision.Result == eval.Escalate {
 		// The Judge has established that only the user can supply the missing
@@ -869,7 +1067,36 @@ func (s *Service) executeRecoveredCalls(ctx context.Context, task TaskContext, r
 }
 
 func (s *Service) executeCallsWithRecovery(ctx context.Context, task TaskContext, request *ModelRequest, calls []ToolCall, modelToolIDs map[string]string, state *loopState, grant *tool.Grant, recoverFirst bool) (bool, error) {
+	if len(state.PendingMemoryMutations) > 0 {
+		for _, call := range calls {
+			request.Messages = append(request.Messages, toolErrorMessage(call, "the call was not executed because a governed Memory mutation invalidated this Tool frame; reconsider it in a new model turn"))
+			state.Trace.ToolCalls = append(state.Trace.ToolCalls, toolResultTrace{
+				ModelTurnID: latestModelTurnID(state), ToolCallID: call.ID, ToolID: modelToolIDs[call.Name], Status: "skipped_after_memory_mutation",
+			})
+		}
+		if err := s.finalizePendingMemoryMutations(ctx, task, request, modelToolIDs, state); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	exclusiveMemoryMutation := -1
 	for index, call := range calls {
+		if modelToolIDs[call.Name] != "builtin.memory" {
+			continue
+		}
+		if _, _, ok := proposedMemoryMutation(call.Arguments); ok {
+			exclusiveMemoryMutation = index
+			break
+		}
+	}
+	for index, call := range calls {
+		if exclusiveMemoryMutation >= 0 && index != exclusiveMemoryMutation {
+			request.Messages = append(request.Messages, toolErrorMessage(call, "the call was not executed because a governed Memory mutation must run alone; reconsider it in a new model turn"))
+			state.Trace.ToolCalls = append(state.Trace.ToolCalls, toolResultTrace{
+				ModelTurnID: latestModelTurnID(state), ToolCallID: call.ID, ToolID: modelToolIDs[call.Name], Status: "skipped_for_memory_mutation",
+			})
+			continue
+		}
 		if !recoverFirst || index > 0 {
 			changed, err := s.refreshAuthoritativeContext(ctx, task, request, state)
 			if err != nil {
@@ -898,10 +1125,15 @@ func (s *Service) executeCallsWithRecovery(ctx context.Context, task TaskContext
 		}
 		toolStarted := time.Now()
 		s.logger.Info("tool call started", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "execution_id", task.ExecutionKey(), "tool_id", toolID, "tool_call_id", call.ID)
+		sourceInteractionID := state.SourceInteractionID
+		if sourceInteractionID == "" {
+			sourceInteractionID = task.CurrentTask.SourceInteractionID
+		}
 		outcome, invokeErr := s.tools.Invoke(ctx, tool.Request{
 			TaskID: task.TaskID, RunID: task.RunID, InvocationID: task.ExecutionKey(),
-			SourceInteractionID: task.CurrentTask.SourceInteractionID,
-			ToolCallID:          call.ID, BasisInputSequence: state.InputSequence,
+			SourceInteractionID: sourceInteractionID, SourceInteractionText: state.SourceInteractionText,
+			SourceInteractionRole: state.SourceInteractionRole, SourceInteractionKind: state.SourceInteractionKind,
+			ToolCallID: call.ID, BasisInputSequence: state.InputSequence,
 			BasisConversationSequence: state.ConversationSequence, ToolID: toolID, Input: call.Arguments, Grant: callGrant,
 		})
 		if errors.Is(invokeErr, tool.ErrStaleTaskInput) {
@@ -931,17 +1163,27 @@ func (s *Service) executeCallsWithRecovery(ctx context.Context, task TaskContext
 			return true, nil
 		}
 		observation := map[string]any{
-			"tool_id": toolID, "intent_id": outcome.Intent.ID,
+			"tool_id": call.Name, "intent_id": outcome.Intent.ID,
 			"status": outcome.Intent.Status, "control": outcome.Control,
 		}
+		memoryMutation := pendingMemoryMutation{}
 		if invokeErr != nil {
 			observation["success"] = false
 			observation["error_code"] = outcome.Intent.ErrorCode
 			observation["error"] = "the tool did not produce a confirmed result"
+			if toolID == "builtin.memory" {
+				if operation, targetID, mutationAttempted := proposedMemoryMutation(call.Arguments); mutationAttempted {
+					memoryMutation = pendingMemoryMutation{
+						Operation: operation, TargetID: targetID, Status: "uncertain",
+						IntentID: outcome.Intent.ID,
+					}
+					appendPendingMemoryMutation(state, memoryMutation)
+				}
+			}
 		} else {
 			state.ConfirmedEffects++
 			observation["success"] = true
-			observation["result"] = outcome.Result
+			observation["result"] = modelVisibleToolResult(outcome.Result)
 			if outcome.Result.Deferred != nil {
 				if state.PendingDeferred != nil && state.PendingDeferred.ID != outcome.Result.Deferred.ID {
 					return false, fmt.Errorf("only one deferred subagent delegation may be active in a task")
@@ -957,6 +1199,22 @@ func (s *Service) executeCallsWithRecovery(ctx context.Context, task TaskContext
 					state.SkillIDs = append(state.SkillIDs, name)
 					sort.Strings(state.SkillIDs)
 					state.ContextManifest.SkillIDs = append([]string(nil), state.SkillIDs...)
+					encodedManifest, err := json.Marshal(state.ContextManifest)
+					if err != nil {
+						return false, err
+					}
+					if err := s.repository.UpdateRunContext(ctx, task.RunID, string(encodedManifest)); err != nil {
+						return false, err
+					}
+				}
+			}
+			if toolID == "builtin.memory" {
+				changed := mergeMemoryReadManifest(&state.ContextManifest, outcome.Result.Output, s.loop.ExternalModel)
+				if mutation, ok := confirmedMemoryMutation(call.Arguments, outcome.Result.Receipt); ok {
+					memoryMutation = mutation
+					appendPendingMemoryMutation(state, mutation)
+				}
+				if changed {
 					encodedManifest, err := json.Marshal(state.ContextManifest)
 					if err != nil {
 						return false, err
@@ -991,11 +1249,300 @@ func (s *Service) executeCallsWithRecovery(ctx context.Context, task TaskContext
 		request.Messages = append(request.Messages, Message{
 			Role: "tool", ToolCallID: call.ID, Content: string(encodedObservation),
 		})
+		if memoryMutation.TargetID != "" {
+			for _, skipped := range calls[index+1:] {
+				request.Messages = append(request.Messages, toolErrorMessage(skipped, "the call was not executed because a governed Memory mutation invalidated this Tool frame; reconsider it in a new model turn"))
+				state.Trace.ToolCalls = append(state.Trace.ToolCalls, toolResultTrace{
+					ModelTurnID: latestModelTurnID(state), ToolCallID: skipped.ID, ToolID: modelToolIDs[skipped.Name], Status: "skipped_after_memory_mutation",
+				})
+			}
+			if err := s.finalizePendingMemoryMutations(ctx, task, request, modelToolIDs, state); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
 		if err := s.saveToolBatchCheckpoint(ctx, task, *request, calls[index+1:], modelToolIDs, *state); err != nil {
 			return false, err
 		}
 	}
 	return false, nil
+}
+
+func modelVisibleToolResult(result tool.Result) map[string]any {
+	visible := map[string]any{
+		"output": result.Output, "receipt": result.Receipt,
+		"fresh_at": result.FreshAt, "uncertainty": result.Uncertainty,
+	}
+	if strings.TrimSpace(result.ExternalObjectID) != "" {
+		visible["external_object_id"] = result.ExternalObjectID
+	}
+	if result.Deferred != nil {
+		visible["deferred"] = result.Deferred
+	}
+	return visible
+}
+
+func confirmedMemoryMutation(arguments json.RawMessage, receipt string) (pendingMemoryMutation, bool) {
+	operation, targetID, ok := proposedMemoryMutation(arguments)
+	if targetID == "" || strings.TrimSpace(receipt) == "" {
+		return pendingMemoryMutation{}, false
+	}
+	if !ok {
+		return pendingMemoryMutation{}, false
+	}
+	return pendingMemoryMutation{Operation: operation, TargetID: targetID, Receipt: strings.TrimSpace(receipt), Status: "confirmed"}, true
+}
+
+func proposedMemoryMutation(arguments json.RawMessage) (string, string, bool) {
+	var input struct {
+		Operation  string `json:"operation"`
+		MemoryID   string `json:"memory_id"`
+		ReplacesID string `json:"replaces_memory_id"`
+	}
+	if json.Unmarshal(arguments, &input) != nil {
+		return "", "", false
+	}
+	operation := strings.TrimSpace(input.Operation)
+	if operation != "forget" && operation != "restrict" && !(operation == "record" && strings.TrimSpace(input.ReplacesID) != "") {
+		return "", "", false
+	}
+	targetID := strings.TrimSpace(input.MemoryID)
+	if targetID == "" {
+		targetID = strings.TrimSpace(input.ReplacesID)
+	}
+	return operation, targetID, targetID != ""
+}
+
+func appendPendingMemoryMutation(state *loopState, mutation pendingMemoryMutation) {
+	for _, existing := range state.PendingMemoryMutations {
+		if existing == mutation {
+			return
+		}
+	}
+	state.PendingMemoryMutations = append(state.PendingMemoryMutations, mutation)
+}
+
+func (s *Service) finalizePendingMemoryMutations(ctx context.Context, task TaskContext, request *ModelRequest, modelToolIDs map[string]string, state *loopState) error {
+	if request == nil || state == nil || len(state.PendingMemoryMutations) == 0 {
+		return nil
+	}
+	mutations := append([]pendingMemoryMutation(nil), state.PendingMemoryMutations...)
+	targets := make(map[string]struct{}, len(mutations))
+	for _, mutation := range mutations {
+		targets[mutation.TargetID] = struct{}{}
+	}
+	request.Messages = sanitizeMemoryExposedTranscript(request.Messages)
+	filtered := make([]Message, 0, len(request.Messages))
+	for _, message := range request.Messages {
+		content := strings.TrimSpace(message.Content)
+		if message.Role == "system" && (strings.HasPrefix(content, "<relevant_memory>") || strings.HasPrefix(content, "<relevant_memory_context>")) {
+			continue
+		}
+		filtered = append(filtered, message)
+	}
+	request.Messages = filtered
+	for _, mutation := range mutations {
+		request.Messages = append(request.Messages, Message{Role: "system", Content: formatMemoryMutationEvent(mutation)})
+	}
+	state.PendingMemoryMutations = nil
+	state.ContextManifest.MemoryRetrievalID = ""
+	state.ContextManifest.MemoryIDs = nil
+	state.ContextManifest.MemoryClaimIDs = nil
+	manualRetrievals := make(map[string]struct{}, len(state.ContextManifest.MemoryToolRetrievalIDs))
+	for _, retrievalID := range state.ContextManifest.MemoryToolRetrievalIDs {
+		manualRetrievals[retrievalID] = struct{}{}
+	}
+	bindings := state.ContextManifest.MemoryBindings[:0]
+	for _, binding := range state.ContextManifest.MemoryBindings {
+		_, manual := manualRetrievals[binding.RetrievalID]
+		_, affected := targets[binding.MemoryID]
+		if manual && !affected {
+			bindings = append(bindings, binding)
+		}
+	}
+	state.ContextManifest.MemoryBindings = bindings
+	state.JudgeContext = candidateEvaluationContext(s.identity, memory.Bundle{}, state.ContextManifest.SourceChannel, time.Now())
+	if sourceIndex := protectedSourceIndex(request.Messages, state); sourceIndex >= 0 {
+		state.ProtectedSourceMessage = sourceIndex + 1
+	}
+	state.NextTurnTrigger = "memory_mutation"
+	encodedManifest, err := json.Marshal(state.ContextManifest)
+	if err != nil {
+		return err
+	}
+	if err := s.repository.UpdateRunContext(ctx, task.RunID, string(encodedManifest)); err != nil {
+		return err
+	}
+	if err := s.saveAgentCheckpoint(ctx, task, "ready_for_model", pendingContinuation{
+		Request: *request, ModelToolIDs: modelToolIDs, State: *state,
+	}); err != nil {
+		return fmt.Errorf("save Memory-mutation checkpoint: %w", err)
+	}
+	return nil
+}
+
+func sanitizeMemoryExposedTranscript(messages []Message) []Message {
+	boundary := len(messages)
+	toolNames := make(map[string]string)
+	for index, message := range messages {
+		content := strings.TrimSpace(message.Content)
+		if message.Role == "system" && (strings.HasPrefix(content, "<relevant_memory>") ||
+			strings.HasPrefix(content, "<relevant_memory_context>") ||
+			isOwnedContextCheckpoint(content)) {
+			if index < boundary {
+				boundary = index
+			}
+		}
+		if message.Role != "assistant" {
+			continue
+		}
+		// A prior non-Memory Tool turn may still have reasoned over automatically
+		// injected Memory whose volatile overlay was intentionally omitted from a
+		// carried transcript. At a governed mutation boundary, the only provable
+		// safe rebuild is therefore to drop the whole retained assistant/tool
+		// suffix, not only frames whose Tool name or arguments mention Memory.
+		if index < boundary {
+			boundary = index
+		}
+		for _, call := range message.ToolCalls {
+			toolNames[call.ID] = call.Name
+		}
+	}
+	if boundary == len(messages) {
+		return append([]Message(nil), messages...)
+	}
+	filtered := make([]Message, 0, len(messages))
+	seenReceipts := make(map[string]struct{})
+	for index, message := range messages {
+		if index < boundary {
+			filtered = append(filtered, message)
+			continue
+		}
+		switch message.Role {
+		case "assistant":
+			if len(message.ToolCalls) == 0 && strings.TrimSpace(message.Content) != "" {
+				message.ReasoningContent = ""
+				filtered = append(filtered, message)
+			}
+			continue
+		case "tool":
+			name := toolNames[message.ToolCallID]
+			if !isMemoryToolCall(name) {
+				if receipt, key, ok := safeToolReceiptEvent(name, message.Content); ok {
+					if _, duplicate := seenReceipts[key]; !duplicate {
+						seenReceipts[key] = struct{}{}
+						filtered = append(filtered, Message{Role: "system", Content: receipt})
+					}
+				}
+			}
+			continue
+		case "system":
+			content := strings.TrimSpace(message.Content)
+			if strings.HasPrefix(content, "<relevant_memory>") || strings.HasPrefix(content, "<relevant_memory_context>") ||
+				isOwnedContextCheckpoint(content) {
+				continue
+			}
+		}
+		filtered = append(filtered, message)
+	}
+	return filtered
+}
+
+func isMemoryToolCall(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "memory", "builtin.memory", "builtin_memory":
+		return true
+	default:
+		return false
+	}
+}
+
+func safeToolReceiptEvent(name, body string) (string, string, bool) {
+	var observation struct {
+		Success  bool   `json:"success"`
+		IntentID string `json:"intent_id"`
+		Status   string `json:"status"`
+		ToolID   string `json:"tool_id"`
+		Result   struct {
+			Receipt string `json:"receipt"`
+		} `json:"result"`
+	}
+	if json.Unmarshal([]byte(body), &observation) != nil || !observation.Success || strings.TrimSpace(observation.Result.Receipt) == "" {
+		return "", "", false
+	}
+	if strings.TrimSpace(observation.ToolID) != "" {
+		name = observation.ToolID
+	}
+	status := strings.TrimSpace(observation.Status)
+	if status == "" {
+		status = "confirmed"
+	}
+	key := strings.TrimSpace(observation.IntentID) + "\x00" + strings.TrimSpace(observation.Result.Receipt)
+	event := "<runtime_event type=\"tool.receipt\">\n" +
+		"  <tool>" + escapeXMLText(strings.TrimSpace(name)) + "</tool>\n" +
+		"  <intent_id>" + escapeXMLText(strings.TrimSpace(observation.IntentID)) + "</intent_id>\n" +
+		"  <status>" + escapeXMLText(status) + "</status>\n" +
+		"  <receipt>" + escapeXMLText(strings.TrimSpace(observation.Result.Receipt)) + "</receipt>\n" +
+		"</runtime_event>"
+	return event, key, true
+}
+
+func formatMemoryMutationEvent(mutation pendingMemoryMutation) string {
+	if mutation.Status != "confirmed" || strings.TrimSpace(mutation.Receipt) == "" {
+		return "<runtime_event type=\"memory.mutation_uncertain\">\n" +
+			"  <operation>" + escapeXMLText(mutation.Operation) + "</operation>\n" +
+			"  <memory_id>" + escapeXMLText(mutation.TargetID) + "</memory_id>\n" +
+			"  <intent_id>" + escapeXMLText(mutation.IntentID) + "</intent_id>\n" +
+			"  <status>uncertain</status>\n" +
+			"</runtime_event>"
+	}
+	return "<runtime_event type=\"memory.mutated\">\n" +
+		"  <operation>" + escapeXMLText(mutation.Operation) + "</operation>\n" +
+		"  <memory_id>" + escapeXMLText(mutation.TargetID) + "</memory_id>\n" +
+		"  <receipt>" + escapeXMLText(mutation.Receipt) + "</receipt>\n" +
+		"</runtime_event>"
+}
+
+func mergeMemoryReadManifest(manifest *execution.ContextManifest, output json.RawMessage, external bool) bool {
+	if manifest == nil {
+		return false
+	}
+	var bundle memory.Bundle
+	if json.Unmarshal(output, &bundle) != nil || strings.TrimSpace(bundle.RetrievalID) == "" {
+		return false
+	}
+	changed := appendUnique(&manifest.MemoryToolRetrievalIDs, bundle.RetrievalID)
+	for _, entry := range bundle.Entries {
+		changed = appendUnique(&manifest.RetrievedMemoryIDs, entry.MemoryID) || changed
+		if external {
+			changed = appendUnique(&manifest.ExternalMemoryIDs, entry.MemoryID) || changed
+			if manifest.ExternalData != nil {
+				changed = appendUnique(&manifest.ExternalData.MemoryIDs, entry.MemoryID) || changed
+			}
+		}
+		binding := execution.MemoryBinding{RetrievalID: bundle.RetrievalID, MemoryID: entry.MemoryID, ClaimID: entry.ClaimID}
+		bindingExists := false
+		for _, existing := range manifest.MemoryBindings {
+			if existing == binding {
+				bindingExists = true
+				break
+			}
+		}
+		if !bindingExists && binding.MemoryID != "" && binding.ClaimID != "" {
+			manifest.MemoryBindings = append(manifest.MemoryBindings, binding)
+			changed = true
+		}
+	}
+	return changed
+}
+
+func appendUnique(values *[]string, value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || contains(*values, value) {
+		return false
+	}
+	*values = append(*values, value)
+	return true
 }
 
 func (s *Service) saveToolBatchCheckpoint(ctx context.Context, task TaskContext, request ModelRequest, pending []ToolCall, modelToolIDs map[string]string, state loopState) error {

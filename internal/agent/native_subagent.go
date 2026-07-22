@@ -209,8 +209,9 @@ func (n *NativeSubagent) HandleRun(ctx context.Context, item runtime.OutboxItem)
 	}
 	state := loopState{
 		TaskText: assignment.Objective, SkillIDs: []string{}, Attachments: []ArtifactAttachment{},
-		ContextManifest: execution.ContextManifest{ToolIDs: nativeToolVersions(descriptors), ResponseProfile: "restricted_subagent", ExternalDataSent: n.external},
-		Capabilities:    capabilities, Trace: runTrace{}, NextTurnTrigger: "initial_request",
+		ProtectedSourceMessage: 1,
+		ContextManifest:        execution.ContextManifest{ToolIDs: nativeToolVersions(descriptors), ResponseProfile: "restricted_subagent", ExternalDataSent: n.external},
+		Capabilities:           capabilities, Trace: runTrace{}, NextTurnTrigger: "initial_request",
 	}
 	recoveryPhase := ""
 	recoveryCalls := []ToolCall(nil)
@@ -346,7 +347,7 @@ func (n *NativeSubagent) executeCalls(ctx context.Context, task TaskContext, req
 			TaskID: task.TaskID, RunID: task.RunID, InvocationID: task.ExecutionKey(),
 			ToolCallID: call.ID, ParentIntentID: task.ExecutionKey(), ToolID: toolID, Input: call.Arguments, Scope: scope,
 		})
-		observation := map[string]any{"tool_id": toolID}
+		observation := map[string]any{"tool_id": call.Name}
 		if invokeErr != nil || outcome.ApprovalRequired || outcome.Intent.Status != tool.IntentConfirmed {
 			observation["success"] = false
 			observation["error"] = "the action was unavailable or outside the Intern's read-only authority; report the blocker instead of retrying"
@@ -374,7 +375,7 @@ func (n *NativeSubagent) finish(ctx context.Context, job subagent.Run, status, c
 	if state != nil {
 		for _, call := range state.Trace.ToolCalls {
 			if call.Status == string(tool.IntentConfirmed) && call.ToolID != "" {
-				result.Evidence = append(result.Evidence, "Confirmed observation from "+call.ToolID+" (intent "+call.IntentID+").")
+				result.Evidence = append(result.Evidence, "Confirmed observation from "+modelToolName(call.ToolID)+" (intent "+call.IntentID+").")
 			}
 		}
 	}

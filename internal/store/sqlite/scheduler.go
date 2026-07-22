@@ -94,7 +94,7 @@ func (s *Store) latestUserDeliveryTarget(ctx context.Context, tx *sql.Tx) (sched
 }
 
 func (s *Store) CreateCommitment(ctx context.Context, commitment scheduler.Commitment) error {
-	messageRef, err := json.Marshal(commitment.MessageRef)
+	taskRef, err := json.Marshal(commitment.TaskRef)
 	if err != nil {
 		return err
 	}
@@ -107,13 +107,13 @@ func (s *Store) CreateCommitment(ctx context.Context, commitment scheduler.Commi
 		return err
 	}
 	defer tx.Rollback()
-	if err := insertContentRef(ctx, tx, commitment.MessageRef, commitment.CreatedAt); err != nil {
+	if err := insertContentRef(ctx, tx, commitment.TaskRef, commitment.CreatedAt); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO commitments(id, message_ref_json, schedule_json, importance, status, next_run_at,
+		INSERT INTO commitments(id, source_task_id, task_ref_json, schedule_json, importance, status, next_run_at,
 			version, created_at, updated_at)
-		VALUES(?, ?, ?, ?, 'active', ?, ?, ?, ?)`, commitment.ID, string(messageRef), string(scheduleJSON),
+		VALUES(?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`, commitment.ID, commitment.SourceTaskID, string(taskRef), string(scheduleJSON),
 		commitment.Importance, formatTime(commitment.NextRunAt), commitment.Version,
 		formatTime(commitment.CreatedAt), formatTime(commitment.UpdatedAt)); err != nil {
 		return err
@@ -121,7 +121,7 @@ func (s *Store) CreateCommitment(ctx context.Context, commitment scheduler.Commi
 	if err := appendEvent(ctx, tx, "commitment", commitment.ID, "commitment.created", map[string]any{
 		"schedule_type": commitment.Schedule.Type, "next_run_at": formatTime(commitment.NextRunAt),
 		"importance": commitment.Importance, "routing_mode": commitment.Target.RoutingMode,
-		"target_channel": commitment.Target.Channel,
+		"target_channel": commitment.Target.Channel, "source_task_id": commitment.SourceTaskID,
 	}, commitment.CreatedAt); err != nil {
 		return err
 	}
@@ -129,7 +129,7 @@ func (s *Store) CreateCommitment(ctx context.Context, commitment scheduler.Commi
 }
 
 func (s *Store) UpdateCommitment(ctx context.Context, replacement scheduler.Commitment) (scheduler.Commitment, error) {
-	messageRef, err := json.Marshal(replacement.MessageRef)
+	taskRef, err := json.Marshal(replacement.TaskRef)
 	if err != nil {
 		return scheduler.Commitment{}, err
 	}
@@ -139,12 +139,12 @@ func (s *Store) UpdateCommitment(ctx context.Context, replacement scheduler.Comm
 	}
 	defer tx.Rollback()
 	var current scheduler.Commitment
-	var currentMessageRef, currentSchedule, lastRun, createdAt string
+	var currentTaskRef, currentSchedule, lastRun, createdAt string
 	err = tx.QueryRowContext(ctx, `
-		SELECT message_ref_json, schedule_json, importance, status, COALESCE(last_run_at, ''),
+		SELECT source_task_id, task_ref_json, schedule_json, importance, status, COALESCE(last_run_at, ''),
 			version, created_at
 		FROM commitments WHERE id = ?`, replacement.ID).
-		Scan(&currentMessageRef, &currentSchedule, &current.Importance, &current.Status, &lastRun, &current.Version, &createdAt)
+		Scan(&current.SourceTaskID, &currentTaskRef, &currentSchedule, &current.Importance, &current.Status, &lastRun, &current.Version, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return scheduler.Commitment{}, fmt.Errorf("commitment not found")
 	}
@@ -154,7 +154,7 @@ func (s *Store) UpdateCommitment(ctx context.Context, replacement scheduler.Comm
 	if current.Status == "completed" || current.Status == "canceled" {
 		return scheduler.Commitment{}, fmt.Errorf("terminal commitment cannot be updated")
 	}
-	if err := json.Unmarshal([]byte(currentMessageRef), &current.MessageRef); err != nil {
+	if err := json.Unmarshal([]byte(currentTaskRef), &current.TaskRef); err != nil {
 		return scheduler.Commitment{}, err
 	}
 	current.Schedule, current.Target, err = decodeCommitmentSchedule(currentSchedule)
@@ -182,13 +182,13 @@ func (s *Store) UpdateCommitment(ctx context.Context, replacement scheduler.Comm
 			return scheduler.Commitment{}, err
 		}
 	}
-	if err := insertContentRef(ctx, tx, replacement.MessageRef, replacement.UpdatedAt); err != nil {
+	if err := insertContentRef(ctx, tx, replacement.TaskRef, replacement.UpdatedAt); err != nil {
 		return scheduler.Commitment{}, err
 	}
 	result, err := tx.ExecContext(ctx, `
-		UPDATE commitments SET message_ref_json = ?, schedule_json = ?, importance = ?, next_run_at = ?,
+		UPDATE commitments SET source_task_id = ?, task_ref_json = ?, schedule_json = ?, importance = ?, next_run_at = ?,
 			version = version + 1, updated_at = ?
-		WHERE id = ? AND version = ?`, string(messageRef), string(scheduleJSON), replacement.Importance,
+		WHERE id = ? AND version = ?`, replacement.SourceTaskID, string(taskRef), string(scheduleJSON), replacement.Importance,
 		formatTime(replacement.NextRunAt), formatTime(replacement.UpdatedAt), replacement.ID, current.Version)
 	if err != nil {
 		return scheduler.Commitment{}, err
@@ -200,6 +200,7 @@ func (s *Store) UpdateCommitment(ctx context.Context, replacement scheduler.Comm
 		"previous_version": current.Version, "schedule_type": replacement.Schedule.Type,
 		"next_run_at": formatTime(replacement.NextRunAt), "importance": replacement.Importance,
 		"routing_mode": replacement.Target.RoutingMode, "target_channel": replacement.Target.Channel,
+		"source_task_id": replacement.SourceTaskID,
 	}, replacement.UpdatedAt); err != nil {
 		return scheduler.Commitment{}, err
 	}
@@ -215,7 +216,7 @@ func (s *Store) UpdateCommitment(ctx context.Context, replacement scheduler.Comm
 
 func (s *Store) ListCommitments(ctx context.Context, limit int) ([]scheduler.Commitment, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, message_ref_json, schedule_json, importance, status, COALESCE(next_run_at, ''),
+		SELECT id, source_task_id, task_ref_json, schedule_json, importance, status, COALESCE(next_run_at, ''),
 			COALESCE(last_run_at, ''), version, created_at, updated_at
 		FROM commitments ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
@@ -225,12 +226,12 @@ func (s *Store) ListCommitments(ctx context.Context, limit int) ([]scheduler.Com
 	commitments := make([]scheduler.Commitment, 0)
 	for rows.Next() {
 		var commitment scheduler.Commitment
-		var messageRef, scheduleJSON, next, last, created, updated string
-		if err := rows.Scan(&commitment.ID, &messageRef, &scheduleJSON, &commitment.Importance, &commitment.Status,
+		var taskRef, scheduleJSON, next, last, created, updated string
+		if err := rows.Scan(&commitment.ID, &commitment.SourceTaskID, &taskRef, &scheduleJSON, &commitment.Importance, &commitment.Status,
 			&next, &last, &commitment.Version, &created, &updated); err != nil {
 			return nil, err
 		}
-		if err := json.Unmarshal([]byte(messageRef), &commitment.MessageRef); err != nil {
+		if err := json.Unmarshal([]byte(taskRef), &commitment.TaskRef); err != nil {
 			return nil, err
 		}
 		commitment.Schedule, commitment.Target, err = decodeCommitmentSchedule(scheduleJSON)
@@ -309,8 +310,11 @@ func (s *Store) SetCommitmentStatus(ctx context.Context, id, status string) erro
 
 func (s *Store) TriggerDueCommitments(ctx context.Context, now time.Time, limit int) (int, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id FROM commitments WHERE status = 'active' AND next_run_at <= ?
-		ORDER BY next_run_at LIMIT ?`, formatTime(now), limit)
+		SELECT c.id FROM commitments c
+		JOIN tasks source ON source.id = c.source_task_id
+		WHERE c.status = 'active' AND c.next_run_at <= ?
+			AND source.status IN ('completed', 'failed')
+		ORDER BY c.next_run_at LIMIT ?`, formatTime(now), limit)
 	if err != nil {
 		return 0, err
 	}
@@ -345,11 +349,13 @@ func (s *Store) triggerCommitment(ctx context.Context, id string, now time.Time)
 		return false, err
 	}
 	defer tx.Rollback()
-	var messageRefJSON, scheduleJSON, scheduledFor string
+	var taskRefJSON, scheduleJSON, scheduledFor string
 	err = tx.QueryRowContext(ctx, `
-		SELECT message_ref_json, schedule_json, next_run_at FROM commitments
-		WHERE id = ? AND status = 'active' AND next_run_at <= ?`, id, formatTime(now)).
-		Scan(&messageRefJSON, &scheduleJSON, &scheduledFor)
+		SELECT c.task_ref_json, c.schedule_json, c.next_run_at
+		FROM commitments c JOIN tasks source ON source.id = c.source_task_id
+		WHERE c.id = ? AND c.status = 'active' AND c.next_run_at <= ?
+			AND source.status IN ('completed', 'failed')`, id, formatTime(now)).
+		Scan(&taskRefJSON, &scheduleJSON, &scheduledFor)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -386,8 +392,8 @@ func (s *Store) triggerCommitment(ctx context.Context, id string, now time.Time)
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO interactions(id, conversation_id, task_id, direction, role, kind, channel, content_ref_json, created_at)
-		VALUES(?, ?, ?, 'inbound', 'system', 'internal_trigger', 'scheduler', ?, ?)`,
-		interactionID, channel.ConversationID, taskID, messageRefJSON, formatTime(now)); err != nil {
+		VALUES(?, ?, ?, 'inbound', 'user', 'internal_trigger', 'scheduler', ?, ?)`,
+		interactionID, channel.ConversationID, taskID, taskRefJSON, formatTime(now)); err != nil {
 		return false, err
 	}
 	if _, err := tx.ExecContext(ctx, `

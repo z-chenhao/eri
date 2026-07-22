@@ -321,8 +321,8 @@ func TestCallExchangesExposeGovernedDetailsWithoutPromptsOrCredentials(t *testin
 		loopTrace: persistedRunTrace{
 			ModelTurns: []persistedModelTurn{{
 				ID: "inv-1:turn:1", Ordinal: 1, Trigger: "initial_request", Status: "succeeded", StartedAt: now, EndedAt: now.Add(time.Second), Checkpoints: []string{"ready_for_model", "model_received"}, FinishReason: "tool_calls",
-				Request:   persistedModelRequest{MessageCount: 3, MessageRoles: map[string]int{"user": 1, "system": 2}, ToolNames: []string{"builtin_web"}, MaxOutputTokens: 1024, EstimatedInputTokens: 400},
-				Assistant: persistedAssistant{Content: "private candidate text", ToolCalls: []persistedToolName{{ID: "call-1", Name: "builtin_web"}}},
+				Request:   persistedModelRequest{MessageCount: 3, MessageRoles: map[string]int{"user": 1, "system": 2}, ToolNames: []string{"web"}, MaxOutputTokens: 1024, EstimatedInputTokens: 400},
+				Assistant: persistedAssistant{Content: "private candidate text", ToolCalls: []persistedToolName{{ID: "call-1", Name: "web"}}},
 				Usage:     persistedUsage{Provider: "deepseek", Model: "deepseek-chat", InputTokens: 310, OutputTokens: 24},
 			}},
 			ToolCalls: []persistedToolCall{{ModelTurnID: "inv-1:turn:1", ToolCallID: "call-1", ToolID: "builtin.web", IntentID: "intent-1", Status: "confirmed"}},
@@ -355,7 +355,7 @@ func TestCallExchangesExposeGovernedDetailsWithoutPromptsOrCredentials(t *testin
 			t.Fatalf("exchange projection leaked %q: %s", forbidden, projection)
 		}
 	}
-	for _, required := range []string{"message_count", "builtin_web", "World Cup tickets", "[REDACTED]", "Official ticket page"} {
+	for _, required := range []string{"message_count", "web", "World Cup tickets", "[REDACTED]", "Official ticket page"} {
 		if !strings.Contains(projection, required) {
 			t.Fatalf("exchange projection missing %q: %s", required, projection)
 		}

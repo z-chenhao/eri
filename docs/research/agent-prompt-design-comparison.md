@@ -2,6 +2,7 @@
 
 > Status: research, not a product or technical baseline
 > Research date: 2026-07-20
+> Baseline reconciliation: updated 2026-07-22 after the Context/Memory protocol refactor; measurements below describe that updated tree.
 > Purpose: identify which instructions truly belong in Eri's primary prompt, remove duplicated ownership, and preserve the confirmed Soul, local-first, authority, Eval, and Delivery boundaries.
 
 ## 1. Conclusion
@@ -88,7 +89,7 @@ The immutable Soul is unchanged. The remaining stable generation prompt now owns
 - freshness, safe recovery, and meaningful progress semantics;
 - the compact Soul-guided visible response profile.
 
-With the default Soul, this stable prompt is 765 whitespace-delimited words and 5,395 UTF-8 bytes (5,387 Unicode characters). The test ceiling is 850 words to catch renewed accretion without pretending word count proves quality.
+With the default Soul, this stable prompt is 870 whitespace-delimited words and 6,085 UTF-8 bytes. The test ceiling is 900 words to catch renewed accretion without pretending word count proves quality.
 
 ### Capability-local instructions
 
@@ -107,7 +108,7 @@ It does not receive Agent operating rules, the general Skill catalog, capability
 
 ### Cache order and test contract
 
-Prompt assembly now puts the stable kernel and Skill catalog before guarded evolution, Memory, and Runtime facts. Tests assert layer order, Eval separation, absence of capability IDs from the kernel, compactness, complete Tool evidence for progress Eval, sanitized legacy-checkpoint recovery, and the essential semantic boundaries instead of preserving every historical sentence.
+Prompt assembly now puts the stable kernel and Skill catalog before versioned Experience and small Runtime facts. Selected Memory is not concatenated into that System string: it is a separate turn-scoped System message placed immediately before the authoritative source Interaction. This preserves a byte-stable reusable prefix while keeping volatile evidence adjacent to what caused the Run. Tests assert layer order, Eval separation, absence of capability IDs from the kernel, compactness, complete Tool evidence for progress Eval, sanitized checkpoint recovery, and the essential semantic boundaries instead of preserving every historical sentence.
 
 ## 6. What remains deliberately unchanged
 
@@ -115,7 +116,7 @@ Prompt assembly now puts the stable kernel and Skill catalog before guarded evol
 - Native `assistant(tool_calls) -> tool(result)` cognition.
 - Policy, Approval, Effect Intent, idempotency, checkpoints, Outbox, Eval, Delivery, and Receipt ownership.
 - Full Skill instructions only after activation.
-- Context compaction and the prohibition on private reasoning persistence.
+- Context compaction at complete Tool-frame boundaries. Provider-required native Tool `reasoning_content` is retained only in encrypted provider transcripts/checkpoints for exact replay; safe Trace, logs, Memory, Episodes, datasets, and Observatory projections omit it. A governed Memory mutation removes the exposed suffix as whole frames rather than rewriting native reasoning.
 - One primary Eri and restricted subagent contexts.
 
 Eri should not add provider-specific personality prompts. A model-specific overlay is justified only by reproducible Eval evidence and must remain small, versioned, and unable to change Soul or authority.
