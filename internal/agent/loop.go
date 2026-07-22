@@ -145,6 +145,8 @@ func runAgentLoop(ctx context.Context, driver loopDriver, task TaskContext, requ
 			finishActiveTurn(&state, &response, "failed")
 		} else {
 			response.Message.Role = "assistant"
+			response.Message.SendTime = time.Now().UTC()
+			response.Message.TemporalContext = true
 			finishActiveTurn(&state, &response, "succeeded")
 		}
 		driver.logger.Info("model call finished", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "execution_id", task.ExecutionKey(), "turn", turnOrdinal, "duration_ms", time.Since(modelStarted).Milliseconds(), "input_tokens", response.Usage.InputTokens, "output_tokens", response.Usage.OutputTokens, "cache_hit_tokens", response.Usage.CacheHitTokens, "cache_miss_tokens", response.Usage.CacheMissTokens, "error_code", observability.ErrorCode(callErr), "error", observability.SafeError(callErr))

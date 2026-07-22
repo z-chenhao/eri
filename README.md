@@ -139,6 +139,8 @@ Without `TAVILY_API_KEY`, Eri does not advertise `builtin.web`; it never falls b
 
 DeepSeek uses the official cost-efficient `deepseek-v4-flash` model, native Thinking Tool Calls with encrypted `reasoning_content` replay and user-owned Run retention, Thinking for evaluation and structured synthesis, stable request prefixes for provider prompt caching, and recorded cache hit/miss token counts. Eri does not send `max_tokens` to DeepSeek and has no fixed model-turn or Task/day/month model-token ceiling; the Agent Loop runs until delivery, cancellation, approval wait, an unrecovered provider or context/account limit, deadline, or another durable terminal condition. `ERI_MAX_EVAL_ATTEMPTS` is an Eval repair fuse, not an Agent Loop length limit.
 
+For local provider diagnosis only, `ERI_DEBUG_LOG=1` writes complete Ollama or DeepSeek request and response bodies to the unified rotating `daemon.log`. This can include prompts, private Messages, Tool arguments/results, and `reasoning_content`; keep it disabled by default and never share a debug log without treating the whole file as sensitive user data.
+
 The file capability observes the daemon's startup directory by default. Override it explicitly when developing:
 
 ```bash

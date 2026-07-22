@@ -236,6 +236,7 @@ func writeDiagnosticBundle(ctx context.Context, cfg config.Config, outputPath st
 	}
 	configuration, _ := json.MarshalIndent(map[string]any{
 		"model_provider": cfg.ModelProvider, "model": observability.SafeText(cfg.Model, 240),
+		"raw_model_debug":        cfg.DebugLog,
 		"memory_embedding_model": observability.SafeText(cfg.MemoryEmbeddingModel, 240),
 		"conversation_address":   cfg.ConversationAddr, "observatory_address": cfg.ObservatoryAddr,
 		"model_configured": cfg.ModelConfigured, "lark_enabled": cfg.LarkEnabled, "lark_brand": cfg.LarkBrand,
@@ -264,7 +265,7 @@ func writeDiagnosticBundle(ctx context.Context, cfg config.Config, outputPath st
 		if len(body) > diagnosticFileLimit {
 			body = body[len(body)-diagnosticFileLimit:]
 		}
-		if err := addDiagnosticBytes(archive, filepath.Join("logs", name), []byte(redactDiagnosticText(string(body)))); err != nil {
+		if err := addDiagnosticBytes(archive, filepath.Join("logs", name), []byte(redactDiagnosticLog(name, string(body)))); err != nil {
 			return err
 		}
 	}
@@ -287,10 +288,42 @@ func redactDiagnosticText(body string) string {
 	scanner := bufio.NewScanner(strings.NewReader(body))
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
+		if isRawProviderDebugRecord(scanner.Text()) {
+			continue
+		}
 		result.WriteString(observability.SafeText(scanner.Text(), 1024*1024))
 		result.WriteByte('\n')
 	}
 	return result.String()
+}
+
+func redactDiagnosticLog(name, body string) string {
+	if strings.Contains(name, "bootstrap") {
+		return redactDiagnosticText(body)
+	}
+	var result strings.Builder
+	scanner := bufio.NewScanner(strings.NewReader(body))
+	scanner.Buffer(make([]byte, 64*1024), diagnosticFileLimit+1)
+	for scanner.Scan() {
+		line := scanner.Text()
+		var record map[string]any
+		// Structured process logs are JSONL. A malformed first line can be a
+		// tail fragment of an oversized raw debug record, so fail closed instead
+		// of copying potentially private bytes into a shareable archive.
+		if json.Unmarshal([]byte(line), &record) != nil || isRawProviderDebugRecord(line) {
+			continue
+		}
+		result.WriteString(observability.SafeText(line, diagnosticFileLimit))
+		result.WriteByte('\n')
+	}
+	return result.String()
+}
+
+func isRawProviderDebugRecord(line string) bool {
+	var record struct {
+		Message string `json:"msg"`
+	}
+	return json.Unmarshal([]byte(line), &record) == nil && strings.HasPrefix(record.Message, "raw model provider ")
 }
 
 func addDiagnosticBytes(archive *zip.Writer, name string, body []byte) error {

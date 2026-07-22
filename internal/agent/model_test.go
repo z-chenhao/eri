@@ -43,6 +43,22 @@ func TestBuildToolDefinitionsIsStableAndProviderSafe(t *testing.T) {
 	}
 }
 
+func TestConversationMessagesExposeReplayStableSendTimeToProviders(t *testing.T) {
+	sentAt := time.Date(2026, time.July, 22, 9, 8, 7, 654321000, time.FixedZone("Asia/Shanghai", 8*60*60))
+	for _, role := range []string{"user", "assistant"} {
+		message := Message{Role: role, Content: "original content", SendTime: sentAt}
+		if got, want := message.TemporalContent(), "<sent_at>2026-07-22T01:08:07.654321Z</sent_at>\noriginal content"; got != want {
+			t.Fatalf("%s temporal content = %q, want %q", role, got, want)
+		}
+		if message.Content != "original content" {
+			t.Fatalf("%s message content was mutated: %+v", role, message)
+		}
+	}
+	if got := (Message{Role: "tool", Content: "observation", SendTime: sentAt}).TemporalContent(); got != "observation" {
+		t.Fatalf("tool observation received conversation timestamp markup: %q", got)
+	}
+}
+
 func TestToolSurfaceTreatsAliasAsProviderProtocol(t *testing.T) {
 	if !sameToolSurface(map[string]string{"files": "builtin.files"}, map[string]string{"files": "builtin.files"}) {
 		t.Fatal("identical Tool surface was rejected")

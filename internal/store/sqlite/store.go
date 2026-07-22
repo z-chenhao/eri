@@ -766,13 +766,13 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 		}
 	}
 	firstSequence := int64(0)
-	var checkpointID, checkpointRefJSON string
+	var checkpointID, checkpointRefJSON, checkpointCreatedAt string
 	var reversed []agent.ContextRecord
 	err = tx.QueryRowContext(ctx, `
-		SELECT id, summary_ref_json, first_kept_sequence
+		SELECT id, summary_ref_json, first_kept_sequence, created_at
 		FROM context_checkpoints
 		WHERE first_kept_sequence <= (SELECT sequence FROM interactions WHERE id = ?)
-		ORDER BY created_at DESC LIMIT 1`, currentTask.SourceInteractionID).Scan(&checkpointID, &checkpointRefJSON, &firstSequence)
+		ORDER BY created_at DESC LIMIT 1`, currentTask.SourceInteractionID).Scan(&checkpointID, &checkpointRefJSON, &firstSequence, &checkpointCreatedAt)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return agent.TaskContext{}, false, err
 	}
@@ -781,16 +781,23 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 		if err := json.Unmarshal([]byte(checkpointRefJSON), &checkpointRef); err != nil {
 			return agent.TaskContext{}, false, err
 		}
+		checkpointTime, err := parseTime(checkpointCreatedAt)
+		if err != nil {
+			return agent.TaskContext{}, false, err
+		}
 		reversed = append(reversed, agent.ContextRecord{
-			ID: checkpointID, Kind: "context_checkpoint", Role: "system", Sequence: firstSequence, ContentRef: checkpointRef,
+			ID: checkpointID, Kind: "context_checkpoint", Role: "system", Sequence: firstSequence, SendTime: checkpointTime, ContentRef: checkpointRef,
 		})
 	}
 	messageQuery := `
-		SELECT sequence, id, task_id, COALESCE(delivery_id, ''), kind, role, content_ref_json FROM interactions
-		WHERE conversation_id = ? AND sequence >= ?
-			AND kind NOT IN ('approval_request', 'runtime_error')
-			AND (kind != 'internal_trigger' OR id = (SELECT source_interaction_id FROM tasks WHERE id = ?))
-		ORDER BY sequence DESC`
+		SELECT i.sequence, i.id, i.task_id, COALESCE(i.delivery_id, ''), i.kind, i.role,
+			i.content_ref_json, COALESCE(cm.external_created_at, i.created_at)
+		FROM interactions i
+		LEFT JOIN channel_messages cm ON cm.interaction_id = i.id
+		WHERE i.conversation_id = ? AND i.sequence >= ?
+			AND i.kind NOT IN ('approval_request', 'runtime_error')
+			AND (i.kind != 'internal_trigger' OR i.id = (SELECT source_interaction_id FROM tasks WHERE id = ?))
+		ORDER BY i.sequence DESC`
 	messageArgs := []any{channel.ConversationID, firstSequence, taskID}
 	rows, err := tx.QueryContext(ctx, messageQuery, messageArgs...)
 	if err != nil {
@@ -798,8 +805,13 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 	}
 	for rows.Next() {
 		var record agent.ContextRecord
-		var encodedRef string
-		if err := rows.Scan(&record.Sequence, &record.ID, &record.TaskID, &record.DeliveryID, &record.Kind, &record.Role, &encodedRef); err != nil {
+		var encodedRef, sendTime string
+		if err := rows.Scan(&record.Sequence, &record.ID, &record.TaskID, &record.DeliveryID, &record.Kind, &record.Role, &encodedRef, &sendTime); err != nil {
+			rows.Close()
+			return agent.TaskContext{}, false, err
+		}
+		record.SendTime, err = parseTime(sendTime)
+		if err != nil {
 			rows.Close()
 			return agent.TaskContext{}, false, err
 		}
@@ -901,18 +913,24 @@ func (s *Store) ClaimTask(ctx context.Context, taskID, owner string, lease time.
 
 func (s *Store) LoadTaskInputsAfter(ctx context.Context, taskID string, afterSequence int64) ([]agent.ContextRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT sequence, id, task_id, COALESCE(delivery_id, ''), kind, role, content_ref_json
-		FROM interactions
-		WHERE task_id = ? AND direction = 'inbound' AND sequence > ?
-		ORDER BY sequence`, taskID, afterSequence)
+		SELECT i.sequence, i.id, i.task_id, COALESCE(i.delivery_id, ''), i.kind, i.role,
+			i.content_ref_json, COALESCE(cm.external_created_at, i.created_at)
+		FROM interactions i
+		LEFT JOIN channel_messages cm ON cm.interaction_id = i.id
+		WHERE i.task_id = ? AND i.direction = 'inbound' AND i.sequence > ?
+		ORDER BY i.sequence`, taskID, afterSequence)
 	if err != nil {
 		return nil, err
 	}
 	records := make([]agent.ContextRecord, 0)
 	for rows.Next() {
 		var record agent.ContextRecord
-		var encodedRef string
-		if err := rows.Scan(&record.Sequence, &record.ID, &record.TaskID, &record.DeliveryID, &record.Kind, &record.Role, &encodedRef); err != nil {
+		var encodedRef, sendTime string
+		if err := rows.Scan(&record.Sequence, &record.ID, &record.TaskID, &record.DeliveryID, &record.Kind, &record.Role, &encodedRef, &sendTime); err != nil {
+			return nil, err
+		}
+		record.SendTime, err = parseTime(sendTime)
+		if err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(encodedRef), &record.ContentRef); err != nil {
@@ -946,9 +964,11 @@ func (s *Store) LoadTaskInputsAfter(ctx context.Context, taskID string, afterSeq
 // not amendments to the resumed Task.
 func (s *Store) LoadConversationUpdatesAfter(ctx context.Context, taskID string, afterSequence int64) ([]agent.ContextRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT i.sequence, i.id, i.task_id, COALESCE(i.delivery_id, ''), i.kind, i.role, i.content_ref_json
+		SELECT i.sequence, i.id, i.task_id, COALESCE(i.delivery_id, ''), i.kind, i.role,
+			i.content_ref_json, COALESCE(cm.external_created_at, i.created_at)
 		FROM interactions i
 		JOIN tasks current ON current.id = ? AND current.conversation_id = i.conversation_id
+		LEFT JOIN channel_messages cm ON cm.interaction_id = i.id
 		WHERE i.task_id != ? AND i.sequence > ? AND i.kind != 'internal_trigger'
 		ORDER BY i.sequence`, taskID, taskID, afterSequence)
 	if err != nil {
@@ -958,8 +978,12 @@ func (s *Store) LoadConversationUpdatesAfter(ctx context.Context, taskID string,
 	records := make([]agent.ContextRecord, 0)
 	for rows.Next() {
 		var record agent.ContextRecord
-		var encodedRef string
-		if err := rows.Scan(&record.Sequence, &record.ID, &record.TaskID, &record.DeliveryID, &record.Kind, &record.Role, &encodedRef); err != nil {
+		var encodedRef, sendTime string
+		if err := rows.Scan(&record.Sequence, &record.ID, &record.TaskID, &record.DeliveryID, &record.Kind, &record.Role, &encodedRef, &sendTime); err != nil {
+			return nil, err
+		}
+		record.SendTime, err = parseTime(sendTime)
+		if err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(encodedRef), &record.ContentRef); err != nil {

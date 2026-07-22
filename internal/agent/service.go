@@ -28,6 +28,7 @@ type ContextRecord struct {
 	Kind        string
 	Sequence    int64
 	Role        string
+	SendTime    time.Time
 	ContentRef  content.Ref
 	Attachments []ContextAttachment
 }
@@ -1043,8 +1044,8 @@ func (s *Service) commitIntermediateProgress(ctx context.Context, task TaskConte
 	// The progress Candidate is evaluated after the complete Tool frame. Keep
 	// every governed observation and Receipt in the transcript, then append the
 	// user-visible text as the exact Candidate under review.
-	judgeMessages = append(judgeMessages, Message{Role: "assistant", Content: body})
 	startedAt := time.Now().UTC()
+	judgeMessages = append(judgeMessages, Message{Role: "assistant", Content: body, SendTime: startedAt, TemporalContext: true})
 	decision, judgeUsage, err := s.evaluateCandidate(ctx, task.TaskID, JudgeRequest{
 		CandidateContext: state.JudgeContext, Messages: judgeMessages, TaskText: state.TaskText,
 		SkillIDs: state.SkillIDs, ConfirmedTools: confirmedTools, MaxOutputTokens: s.loop.MaxOutputTokens,

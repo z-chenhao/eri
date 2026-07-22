@@ -160,6 +160,23 @@ func TestLoadCanConfigureApprovalTTL(t *testing.T) {
 	}
 }
 
+func TestLoadConfiguresUnifiedRawDebugLog(t *testing.T) {
+	t.Setenv("ERI_DATA_ROOT", t.TempDir())
+	t.Setenv("ERI_WORKSPACE_ROOT", t.TempDir())
+	t.Setenv("ERI_DEBUG_LOG", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.DebugLog {
+		t.Fatal("ERI_DEBUG_LOG did not enable raw provider logging")
+	}
+	t.Setenv("ERI_DEBUG_LOG", "sometimes")
+	if _, err := Load(); err == nil {
+		t.Fatal("invalid ERI_DEBUG_LOG value unexpectedly accepted")
+	}
+}
+
 func TestLoadRejectsUnsafeApprovalTTL(t *testing.T) {
 	t.Setenv("ERI_DATA_ROOT", t.TempDir())
 	t.Setenv("ERI_WORKSPACE_ROOT", t.TempDir())

@@ -555,6 +555,9 @@ func carriedProviderMessages(messages []Message) []Message {
 		if message.Role == "assistant" && len(message.ToolCalls) == 0 {
 			message.ReasoningContent = ""
 		}
+		if message.Role == "user" || message.Role == "assistant" {
+			message.TemporalContext = true
+		}
 		carried = append(carried, snapshotModelRequest(ModelRequest{Messages: []Message{message}}).Messages[0])
 	}
 	return carried
@@ -615,7 +618,10 @@ func (s *Service) buildContextMessages(ctx context.Context, records []ContextRec
 			}
 			assembled.WriteString("\n[END USER ATTACHMENT]")
 		}
-		messages = append(messages, Message{Role: record.Role, Content: assembled.String(), Images: images})
+		messages = append(messages, Message{
+			Role: record.Role, Content: assembled.String(), SendTime: record.SendTime,
+			TemporalContext: record.Role == "user" || record.Role == "assistant", Images: images,
+		})
 	}
 	return messages, nil
 }

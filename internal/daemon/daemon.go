@@ -209,12 +209,12 @@ func New(ctx context.Context, cfg config.Config, dependencies Dependencies) (_ *
 	if model == nil {
 		switch cfg.ModelProvider {
 		case "", "ollama":
-			model = ollama.New(cfg.OllamaURL, cfg.Model, cfg.ModelTimeout)
+			model = ollama.New(cfg.OllamaURL, cfg.Model, cfg.ModelTimeout, logger, cfg.DebugLog)
 		case "deepseek":
 			if cfg.DeepSeekKeySet {
-				model, err = deepseek.New(cfg.DeepSeekURL, os.Getenv("DEEPSEEK_API_KEY"), cfg.Model, cfg.ModelTimeout)
+				model, err = deepseek.New(cfg.DeepSeekURL, os.Getenv("DEEPSEEK_API_KEY"), cfg.Model, cfg.ModelTimeout, logger, cfg.DebugLog)
 			} else {
-				model, err = deepseek.NewViaBroker(cfg.ProviderBrokerSocket, cfg.Model, cfg.ModelTimeout)
+				model, err = deepseek.NewViaBroker(cfg.ProviderBrokerSocket, cfg.Model, cfg.ModelTimeout, logger, cfg.DebugLog)
 			}
 			if err != nil {
 				store.Close()
