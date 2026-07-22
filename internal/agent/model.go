@@ -44,12 +44,11 @@ type ToolDefinition struct {
 }
 
 type ModelRequest struct {
-	System            string           `json:"system"`
-	Messages          []Message        `json:"messages"`
-	Tools             []ToolDefinition `json:"tools,omitempty"`
-	JSONOutput        bool             `json:"json_output,omitempty"`
-	ReasoningDisabled bool             `json:"reasoning_disabled,omitempty"`
-	MaxOutputTokens   int              `json:"max_output_tokens"`
+	System          string           `json:"system"`
+	Messages        []Message        `json:"messages"`
+	Tools           []ToolDefinition `json:"tools,omitempty"`
+	JSONOutput      bool             `json:"json_output,omitempty"`
+	MaxOutputTokens int              `json:"max_output_tokens"`
 }
 
 type ModelResponse struct {

@@ -184,31 +184,26 @@ func (c *Client) Complete(ctx context.Context, input agent.ModelRequest) (agent.
 		candidate.Function.Parameters = definition.Parameters
 		tools = append(tools, candidate)
 	}
-	// Eri does not impose a model-output token ceiling. MaxOutputTokens remains
-	// part of the provider-neutral request so Context Assembly can reserve room
-	// inside the provider context window, but DeepSeek receives no max_tokens
-	// parameter and may complete naturally within its own protocol limits.
+	// The Agent Loop does not impose a model-output token ceiling.
+	// MaxOutputTokens normally reserves context room only; a native structured
+	// protocol such as Judge explicitly bounds its small JSON result below.
 	requestBody := chatRequest{Model: c.model, Messages: messages, Tools: tools, Stream: false}
 	if input.JSONOutput {
 		requestBody.ResponseFormat = &responseFormat{Type: "json_object"}
+		if input.MaxOutputTokens > 0 {
+			requestBody.MaxTokens = &input.MaxOutputTokens
+		}
 	}
 	// Thinking is part of DeepSeek's native Tool protocol. Eri stores each
 	// assistant reasoning_content beside its Tool Calls in the durable model
 	// transcript and sends it back on every later request that contains that
 	// assistant message, including after checkpoint recovery.
 	requestBody.Thinking = map[string]any{"type": "enabled"}
-	if input.ReasoningDisabled {
-		requestBody.Thinking = map[string]any{"type": "disabled"}
-		if input.MaxOutputTokens > 0 {
-			requestBody.MaxTokens = &input.MaxOutputTokens
-		}
-	} else {
-		// DeepSeek accepts the OpenAI-compatible medium spelling but currently
-		// maps it to its lowest supported thinking tier, high. Keep the requested
-		// balanced wire value explicit rather than allowing Agent-like requests
-		// to be promoted automatically to max.
-		requestBody.ReasoningEffort = "medium"
-	}
+	// DeepSeek accepts the OpenAI-compatible medium spelling but currently
+	// maps it to its lowest supported thinking tier, high. Keep the requested
+	// balanced wire value explicit rather than allowing Agent-like requests to
+	// be promoted automatically to max.
+	requestBody.ReasoningEffort = "medium"
 	encoded, err := json.Marshal(requestBody)
 	if err != nil {
 		return agent.ModelResponse{}, fmt.Errorf("encode DeepSeek request: %w", err)
