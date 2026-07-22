@@ -61,7 +61,7 @@ func TestClientUsesNativeToolsAndParsesCacheUsage(t *testing.T) {
 	}
 }
 
-func TestClientDisablesThinkingForStructuredEvaluation(t *testing.T) {
+func TestClientUsesThinkingAndBoundedContentForStructuredEvaluation(t *testing.T) {
 	t.Parallel()
 	var observed chatRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -76,11 +76,11 @@ func TestClientDisablesThinkingForStructuredEvaluation(t *testing.T) {
 	defer server.Close()
 	client, _ := New(server.URL, "test-secret", "deepseek-v4-flash", time.Second)
 	if _, err := client.Complete(context.Background(), agent.ModelRequest{
-		System: "judge carefully", JSONOutput: true, ReasoningDisabled: true, MaxOutputTokens: 128,
+		System: "judge carefully", JSONOutput: true, MaxOutputTokens: 128,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if observed.Thinking["type"] != "disabled" || observed.ReasoningEffort != "" || observed.ToolChoice != "" || observed.Temperature != nil || observed.MaxTokens == nil || *observed.MaxTokens != 128 || observed.ResponseFormat == nil || observed.ResponseFormat.Type != "json_object" {
+	if observed.Thinking["type"] != "enabled" || observed.ReasoningEffort != "medium" || observed.ToolChoice != "" || observed.Temperature != nil || observed.MaxTokens == nil || *observed.MaxTokens != 128 || observed.ResponseFormat == nil || observed.ResponseFormat.Type != "json_object" {
 		t.Fatalf("tool-free request = %+v", observed)
 	}
 }
@@ -108,12 +108,12 @@ func TestClientReplaysReasoningContentForToolHistoryWithoutCurrentTools(t *testi
 			{Role: "assistant", Content: "I found a reliable source and am checking one more detail."},
 			{Role: "user", Content: "evaluate the progress candidate"},
 		},
-		JSONOutput: true, ReasoningDisabled: true,
+		JSONOutput: true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if observed.Thinking["type"] != "disabled" || observed.ReasoningEffort != "" || observed.ToolChoice != "" || observed.Temperature != nil {
+	if observed.Thinking["type"] != "enabled" || observed.ReasoningEffort != "medium" || observed.ToolChoice != "" || observed.Temperature != nil {
 		t.Fatalf("historical tool request = %+v", observed)
 	}
 	if len(observed.Messages) < 3 || observed.Messages[2].ReasoningContent != "I need a governed lookup before judging the claim." {

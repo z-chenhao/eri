@@ -90,8 +90,8 @@ func (m *explicitSkillModel) Complete(_ context.Context, request agent.ModelRequ
 	defer m.mu.Unlock()
 	usage := agent.Usage{Provider: "fake", Model: "explicit-skill", ModelCalls: 1}
 	if strings.Contains(request.System, "<eri_eval_judge>") {
-		if !strings.Contains(request.System, "<evaluation_context>") || !strings.Contains(request.System, "writing-delivery") {
-			return agent.ModelResponse{}, fmt.Errorf("Judge did not receive explicitly activated skill in System context")
+		if len(request.Messages) != 1 || request.Messages[0].Role != "user" || !strings.Contains(request.Messages[0].Content, "writing-delivery") {
+			return agent.ModelResponse{}, fmt.Errorf("Judge did not receive explicitly activated skill in its evaluation envelope")
 		}
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: `{"result":"pass","tier":"routine","findings":[]}`}, FinishReason: "stop", Usage: usage}, nil
 	}
@@ -122,8 +122,8 @@ func (m *skillActivationModel) Complete(_ context.Context, request agent.ModelRe
 	defer m.mu.Unlock()
 	usage := agent.Usage{Provider: "fake", Model: "skill-activation", ModelCalls: 1}
 	if strings.Contains(request.System, "<eri_eval_judge>") {
-		if !strings.Contains(request.System, "<evaluation_context>") || !strings.Contains(request.System, "research-decision") {
-			return agent.ModelResponse{}, fmt.Errorf("Judge did not receive activated skill in System context")
+		if len(request.Messages) != 1 || request.Messages[0].Role != "user" || !strings.Contains(request.Messages[0].Content, "research-decision") {
+			return agent.ModelResponse{}, fmt.Errorf("Judge did not receive activated skill in its evaluation envelope")
 		}
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: `{"result":"pass","tier":"substantive","findings":[]}`}, FinishReason: "stop", Usage: usage}, nil
 	}
