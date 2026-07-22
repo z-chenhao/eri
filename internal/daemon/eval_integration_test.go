@@ -48,8 +48,8 @@ func (m *newsEvalRepairModel) Complete(_ context.Context, request agent.ModelReq
 			return agent.ModelResponse{}, fmt.Errorf("task Eval repair instruction missing: %+v", last)
 		}
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-			ID: "news-commitment", Name: "builtin_commitments", Arguments: json.RawMessage(`{
-				"operation":"create","message":"Track important AI news and send summaries of material changes",
+			ID: "news-commitment", Name: "schedule", Arguments: json.RawMessage(`{
+				"operation":"create","task":"Track important AI news and send summaries of material changes",
 				"schedule":{"type":"daily","daily_time":"09:00","timezone":"Asia/Shanghai"},"importance":"normal",
 				"delivery_route":"recent_channel"
 			}`),
@@ -90,9 +90,8 @@ func (m *explicitSkillModel) Complete(_ context.Context, request agent.ModelRequ
 	defer m.mu.Unlock()
 	usage := agent.Usage{Provider: "fake", Model: "explicit-skill", ModelCalls: 1}
 	if strings.Contains(request.System, "<eri_eval_judge>") {
-		last := request.Messages[len(request.Messages)-1].Content
-		if !strings.Contains(last, `"selected_skills":["writing-delivery"]`) {
-			return agent.ModelResponse{}, fmt.Errorf("Judge did not receive explicitly activated skill: %s", last)
+		if !strings.Contains(request.System, "<evaluation_context>") || !strings.Contains(request.System, "writing-delivery") {
+			return agent.ModelResponse{}, fmt.Errorf("Judge did not receive explicitly activated skill in System context")
 		}
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: `{"result":"pass","tier":"routine","findings":[]}`}, FinishReason: "stop", Usage: usage}, nil
 	}
@@ -105,7 +104,7 @@ func (m *explicitSkillModel) Complete(_ context.Context, request agent.ModelRequ
 			}
 		}
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-			ID: "load-writing", Name: "builtin_skills", Arguments: json.RawMessage(`{"operation":"load","name":"writing-delivery"}`),
+			ID: "load-writing", Name: "skills", Arguments: json.RawMessage(`{"operation":"load","name":"writing-delivery"}`),
 		}}}, FinishReason: "tool_calls", Usage: usage}, nil
 	case 2:
 		last := request.Messages[len(request.Messages)-1]
@@ -123,9 +122,8 @@ func (m *skillActivationModel) Complete(_ context.Context, request agent.ModelRe
 	defer m.mu.Unlock()
 	usage := agent.Usage{Provider: "fake", Model: "skill-activation", ModelCalls: 1}
 	if strings.Contains(request.System, "<eri_eval_judge>") {
-		last := request.Messages[len(request.Messages)-1].Content
-		if !strings.Contains(last, `"selected_skills":["research-decision"]`) {
-			return agent.ModelResponse{}, fmt.Errorf("Judge did not receive activated skill: %s", last)
+		if !strings.Contains(request.System, "<evaluation_context>") || !strings.Contains(request.System, "research-decision") {
+			return agent.ModelResponse{}, fmt.Errorf("Judge did not receive activated skill in System context")
 		}
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: `{"result":"pass","tier":"substantive","findings":[]}`}, FinishReason: "stop", Usage: usage}, nil
 	}
@@ -140,13 +138,13 @@ func (m *skillActivationModel) Complete(_ context.Context, request agent.ModelRe
 		}
 		found := false
 		for _, definition := range request.Tools {
-			found = found || definition.Name == "builtin_skills"
+			found = found || definition.Name == "skills"
 		}
 		if !found {
 			return agent.ModelResponse{}, fmt.Errorf("generic skill loader tool is missing")
 		}
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-			ID: "load-research", Name: "builtin_skills", Arguments: json.RawMessage(`{"operation":"load","name":"research-decision"}`),
+			ID: "load-research", Name: "skills", Arguments: json.RawMessage(`{"operation":"load","name":"research-decision"}`),
 		}}}, FinishReason: "tool_calls", Usage: usage}, nil
 	case 2:
 		last := request.Messages[len(request.Messages)-1]
@@ -170,7 +168,7 @@ func (m *evidenceScenarioModel) Complete(_ context.Context, request agent.ModelR
 	if m.calls == 1 {
 		found := false
 		for _, definition := range request.Tools {
-			found = found || definition.Name == "builtin_web"
+			found = found || definition.Name == "web"
 		}
 		if !found {
 			return agent.ModelResponse{}, fmt.Errorf("web descriptor missing")
@@ -181,7 +179,7 @@ func (m *evidenceScenarioModel) Complete(_ context.Context, request agent.ModelR
 			if err != nil {
 				return agent.ModelResponse{}, err
 			}
-			calls = append(calls, agent.ToolCall{ID: fmt.Sprintf("web-%d", index+1), Name: "builtin_web", Arguments: arguments})
+			calls = append(calls, agent.ToolCall{ID: fmt.Sprintf("web-%d", index+1), Name: "web", Arguments: arguments})
 		}
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", ToolCalls: calls}, FinishReason: "tool_calls", Usage: usage}, nil
 	}

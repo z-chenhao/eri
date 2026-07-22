@@ -72,7 +72,8 @@ func (*compactionCapturingModel) Capabilities(context.Context) (ModelCapabilitie
 
 func TestDelegationCompactionDoesNotPromoteReasoningContentIntoSummary(t *testing.T) {
 	model := &compactionCapturingModel{}
-	messages := []Message{{
+	objective := "Verify the scoped evidence and report one conclusion."
+	messages := []Message{{Role: "user", Content: objective}, {
 		Role: "assistant", Content: strings.Repeat("evidence ", 800),
 		ReasoningContent: "provider-private-reasoning-marker",
 	}}
@@ -91,6 +92,9 @@ func TestDelegationCompactionDoesNotPromoteReasoningContentIntoSummary(t *testin
 	}
 	if len(model.request.Messages) != 1 || strings.Contains(model.request.Messages[0].Content, "provider-private-reasoning-marker") {
 		t.Fatalf("compaction promoted reasoning_content: %+v", model.request.Messages)
+	}
+	if request.Messages[0].Role != "user" || request.Messages[0].Content != objective {
+		t.Fatalf("compaction rewrote the authoritative delegated objective: %+v", request.Messages[0])
 	}
 	if request.Messages[len(request.Messages)-1].ReasoningContent != "recent-provider-continuation" {
 		t.Fatalf("compaction removed continuation from retained provider context: %+v", request.Messages)

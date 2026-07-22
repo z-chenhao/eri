@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -156,11 +157,14 @@ func (c *Client) Complete(ctx context.Context, input agent.ModelRequest) (agent.
 			return agent.ModelResponse{}, fmt.Errorf("DeepSeek thinking transcript message %d has Tool Calls without reasoning_content", index)
 		}
 		content := message.Content
+		// DeepSeek's thinking Tool examples replay assistant Tool Calls with
+		// content="". Keep that non-null protocol value while replaying the
+		// provider-native reasoning_content and Tool Calls unchanged.
 		native := chatMessage{
 			Role: message.Role, Content: &content, ReasoningContent: message.ReasoningContent,
 			ToolCallID: message.ToolCallID,
 		}
-		if message.Role == "assistant" && content == "" {
+		if message.Role == "assistant" && content == "" && len(message.ToolCalls) == 0 {
 			native.Content = nil
 		}
 		for _, call := range message.ToolCalls {
@@ -193,11 +197,16 @@ func (c *Client) Complete(ctx context.Context, input agent.ModelRequest) (agent.
 	// transcript and sends it back on every later request that contains that
 	// assistant message, including after checkpoint recovery.
 	requestBody.Thinking = map[string]any{"type": "enabled"}
-	requestBody.ReasoningEffort = "high"
+	// DeepSeek accepts the OpenAI-compatible medium spelling but currently
+	// maps it to its lowest supported thinking tier, high. Keep the requested
+	// balanced wire value explicit rather than allowing Agent-like requests to
+	// be promoted automatically to max.
+	requestBody.ReasoningEffort = "medium"
 	encoded, err := json.Marshal(requestBody)
 	if err != nil {
 		return agent.ModelResponse{}, fmt.Errorf("encode DeepSeek request: %w", err)
 	}
+	debugRequestBody(os.Stderr, encoded)
 	started := time.Now()
 	response, err := c.completeWithRecovery(ctx, encoded)
 	if err != nil {
@@ -231,6 +240,15 @@ func (c *Client) Complete(ctx context.Context, input agent.ModelRequest) (agent.
 			ModelCalls:      1, DurationMillis: time.Since(started).Milliseconds(),
 		},
 	}, nil
+}
+
+func debugRequestBody(writer io.Writer, encoded []byte) {
+	if os.Getenv("ERI_DEBUG_DEEPSEEK_REQUEST_BODY") != "1" {
+		return
+	}
+	// Developer-only explicit opt-in: encoded may contain the complete private
+	// conversation, Memory, Tool arguments, and provider continuation state.
+	fmt.Fprintf(writer, "DeepSeek requestBody: %s\n", encoded)
 }
 
 const deepSeekAttempts = 3

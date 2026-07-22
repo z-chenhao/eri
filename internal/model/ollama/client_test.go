@@ -23,7 +23,7 @@ func TestClientUsesNativeToolCalling(t *testing.T) {
 		}
 		json.NewEncoder(w).Encode(map[string]any{
 			"message": map[string]any{"role": "assistant", "tool_calls": []any{
-				map[string]any{"id": "call-1", "type": "function", "function": map[string]any{"name": "builtin_files", "arguments": map[string]any{"operation": "read", "path": "brief.txt"}}},
+				map[string]any{"id": "call-1", "type": "function", "function": map[string]any{"name": "files", "arguments": map[string]any{"operation": "read", "path": "brief.txt"}}},
 			}},
 			"done_reason": "tool_calls", "prompt_eval_count": 42, "eval_count": 12,
 		})
@@ -33,7 +33,7 @@ func TestClientUsesNativeToolCalling(t *testing.T) {
 	client := New(server.URL, "test-model", time.Second)
 	response, err := client.Complete(context.Background(), agent.ModelRequest{
 		System: "stable soul", Messages: []agent.Message{{Role: "user", Content: "read it"}},
-		Tools:           []agent.ToolDefinition{{Name: "builtin_files", Description: "files", Parameters: map[string]any{"type": "object"}}},
+		Tools:           []agent.ToolDefinition{{Name: "files", Description: "files", Parameters: map[string]any{"type": "object"}}},
 		MaxOutputTokens: 333,
 	})
 	if err != nil {
@@ -48,7 +48,7 @@ func TestClientUsesNativeToolCalling(t *testing.T) {
 	if observed.Options["num_predict"] != float64(333) {
 		t.Fatalf("output budget = %#v", observed.Options["num_predict"])
 	}
-	if len(response.Message.ToolCalls) != 1 || response.Message.ToolCalls[0].Name != "builtin_files" {
+	if len(response.Message.ToolCalls) != 1 || response.Message.ToolCalls[0].Name != "files" {
 		t.Fatalf("response = %+v", response)
 	}
 	if response.Usage.InputTokens != 42 || response.Usage.OutputTokens != 12 {
@@ -68,7 +68,7 @@ func TestClientPreservesAssistantCallAndMatchingToolResult(t *testing.T) {
 	_, err := client.Complete(context.Background(), agent.ModelRequest{
 		System: "stable", Messages: []agent.Message{
 			{Role: "user", Content: "read"},
-			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1", Name: "builtin_files", Arguments: json.RawMessage(`{"operation":"read","path":"brief.txt"}`)}}},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1", Name: "files", Arguments: json.RawMessage(`{"operation":"read","path":"brief.txt"}`)}}},
 			{Role: "tool", ToolCallID: "call-1", Content: `{"success":true}`},
 		},
 	})
@@ -76,7 +76,7 @@ func TestClientPreservesAssistantCallAndMatchingToolResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	toolResult := observed.Messages[len(observed.Messages)-1]
-	if toolResult.Role != "tool" || toolResult.ToolCallID != "call-1" || toolResult.ToolName != "builtin_files" {
+	if toolResult.Role != "tool" || toolResult.ToolCallID != "call-1" || toolResult.ToolName != "files" {
 		t.Fatalf("tool result = %+v", toolResult)
 	}
 }

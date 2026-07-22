@@ -18,6 +18,7 @@ import (
 	"github.com/z-chenhao/eri/internal/delivery"
 	"github.com/z-chenhao/eri/internal/episode"
 	"github.com/z-chenhao/eri/internal/eval"
+	"github.com/z-chenhao/eri/internal/memory"
 	"github.com/z-chenhao/eri/internal/policy"
 	"github.com/z-chenhao/eri/internal/tool"
 	"github.com/z-chenhao/eri/internal/userdata"
@@ -313,6 +314,8 @@ func TestOpenInitializesOnlyTheAuthoritativeSchema(t *testing.T) {
 		"eval_records":               {required: []string{"findings_ref_json", "finding_count"}, forbidden: []string{"findings_json"}},
 		"effect_intents":             {required: []string{"payload_ref_json", "parent_intent_id", "invocation_id", "tool_call_id"}},
 		"conversation_introductions": {required: []string{"conversation_id", "task_id", "requested_at"}},
+		"commitments":                {required: []string{"source_task_id", "task_ref_json"}},
+		"memory_items":               {required: []string{"replaces_memory_id"}},
 		"memory_semantic_index":      {required: []string{"memory_id", "model_id", "content_hash", "vector_ref_json"}},
 	} {
 		rows, err := store.db.Query(`PRAGMA table_info(` + table + `)`)
@@ -548,8 +551,63 @@ func TestContextCheckpointReplacesOnlyOlderConversationHistory(t *testing.T) {
 	if loaded.Messages[0].Kind != "context_checkpoint" || loaded.Messages[0].ID != "checkpoint" {
 		t.Fatalf("checkpoint message=%+v", loaded.Messages[0])
 	}
+	if loaded.Messages[0].Sequence != secondSequence {
+		t.Fatalf("checkpoint coverage boundary=%d, want %d", loaded.Messages[0].Sequence, secondSequence)
+	}
 	if loaded.Messages[1].ID != second.InteractionID || loaded.Messages[2].ID != third.InteractionID {
 		t.Fatalf("retained messages=%+v", loaded.Messages)
+	}
+}
+
+func TestClaimOlderQueuedTaskSkipsCheckpointBeyondItsSource(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "eri.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	older, err := store.CreateInbound(ctx, "web", testRef("queued-old-source", "queued-old-hash"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer, err := store.CreateInbound(ctx, "web", testRef("queued-new-source", "queued-new-hash"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newer.TaskID == older.TaskID {
+		t.Fatal("new input unexpectedly joined an undispatched queued task")
+	}
+	newerTask, claimed, err := store.ClaimTask(ctx, newer.TaskID, "newer-worker", time.Minute, "soul", `{}`, "test:model")
+	if err != nil || !claimed {
+		t.Fatalf("newer task=%+v claimed=%v err=%v", newerTask, claimed, err)
+	}
+	var newerSequence int64
+	if err := store.db.QueryRow(`SELECT sequence FROM interactions WHERE id = ?`, newer.InteractionID).Scan(&newerSequence); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveContextCheckpoint(ctx, newer.TaskID, newerTask.RunID, agent.ContextCheckpoint{
+		ID: "too-new-checkpoint", SummaryRef: testRef("too-new-summary", "too-new-summary-hash"),
+		FirstKeptSequence: newerSequence, SummarizedCount: 1, TokensBefore: 9000, TokensAfter: 3000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	olderTask, claimed, err := store.ClaimTask(ctx, older.TaskID, "older-worker", time.Minute, "soul", `{}`, "test:model")
+	if err != nil || !claimed {
+		t.Fatalf("older task=%+v claimed=%v err=%v", olderTask, claimed, err)
+	}
+	for _, message := range olderTask.Messages {
+		if message.Kind == "context_checkpoint" {
+			t.Fatalf("older source was hidden behind newer checkpoint: %+v", olderTask.Messages)
+		}
+	}
+	foundSource := false
+	for _, message := range olderTask.Messages {
+		if message.ID == older.InteractionID {
+			foundSource = true
+		}
+	}
+	if !foundSource {
+		t.Fatalf("older task source missing: %+v", olderTask.Messages)
 	}
 }
 
@@ -937,6 +995,169 @@ func TestReliableReplyTransactionFlowIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestClaimTaskDoesNotCarryProviderTranscriptAcrossModelTargets(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	first, err := store.CreateInbound(ctx, "cli", testRef("first-inbound", "first-inbound-hash"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wake, ok, err := store.ClaimOutbox(ctx, "worker", time.Minute)
+	if err != nil || !ok || wake.Kind != "task.wake" {
+		t.Fatalf("first wake=%+v ok=%t err=%v", wake, ok, err)
+	}
+	if err := store.CompleteOutbox(ctx, wake.ID); err != nil {
+		t.Fatal(err)
+	}
+	firstTask, claimed, err := store.ClaimTask(ctx, first.TaskID, "worker", time.Minute, "soul", `{}`, "ollama:model-a")
+	if err != nil || !claimed {
+		t.Fatalf("first task=%+v claimed=%t err=%v", firstTask, claimed, err)
+	}
+	if err := store.MarkRunDispatched(ctx, firstTask.RunID); err != nil {
+		t.Fatal(err)
+	}
+	commit := testCommit(firstTask, testRef("first-reply", "first-reply-hash"), eval.Pass)
+	if err := store.CommitArtifact(ctx, commit); err != nil {
+		t.Fatal(err)
+	}
+	deliveryItem, ok, err := store.ClaimOutbox(ctx, "worker", time.Minute)
+	if err != nil || !ok || deliveryItem.Kind != "delivery.send" {
+		t.Fatalf("first delivery=%+v ok=%t err=%v", deliveryItem, ok, err)
+	}
+	if err := store.CommitConversationDelivery(ctx, commit.DeliveryID, "first-outbound", delivery.Receipt{Level: "accepted_by_channel"}, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteOutbox(ctx, deliveryItem.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := store.CreateInbound(ctx, "cli", testRef("second-inbound", "second-inbound-hash"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		secondWake, ok, err := store.ClaimOutbox(ctx, "worker", time.Minute)
+		if err != nil || !ok {
+			t.Fatalf("second wake=%+v ok=%t err=%v", secondWake, ok, err)
+		}
+		if err := store.CompleteOutbox(ctx, secondWake.ID); err != nil {
+			t.Fatal(err)
+		}
+		if secondWake.Kind == "task.wake" {
+			break
+		}
+	}
+	secondTask, claimed, err := store.ClaimTask(ctx, second.TaskID, "worker", time.Minute, "soul", `{}`, "deepseek:model-b")
+	if err != nil || !claimed {
+		t.Fatalf("second task=%+v claimed=%t err=%v", secondTask, claimed, err)
+	}
+	if secondTask.PriorTranscriptRef.ObjectID != "" || secondTask.PriorTranscriptSequence != 0 {
+		t.Fatalf("cross-target provider transcript was carried: ref=%+v sequence=%d", secondTask.PriorTranscriptRef, secondTask.PriorTranscriptSequence)
+	}
+	if err := store.MarkRunDispatched(ctx, secondTask.RunID); err != nil {
+		t.Fatal(err)
+	}
+	secondCommit := testCommit(secondTask, testRef("second-reply", "second-reply-hash"), eval.Pass)
+	if err := store.CommitArtifact(ctx, secondCommit); err != nil {
+		t.Fatal(err)
+	}
+	secondDelivery, ok, err := store.ClaimOutbox(ctx, "worker", time.Minute)
+	if err != nil || !ok || secondDelivery.Kind != "delivery.send" {
+		t.Fatalf("second delivery=%+v ok=%t err=%v", secondDelivery, ok, err)
+	}
+	if err := store.CommitConversationDelivery(ctx, secondCommit.DeliveryID, "second-outbound", delivery.Receipt{Level: "accepted_by_channel"}, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteOutbox(ctx, secondDelivery.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	third, err := store.CreateInbound(ctx, "cli", testRef("third-inbound", "third-inbound-hash"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thirdTask, claimed, err := store.ClaimTask(ctx, third.TaskID, "worker", time.Minute, "soul", `{}`, "ollama:model-a")
+	if err != nil || !claimed {
+		t.Fatalf("third task=%+v claimed=%t err=%v", thirdTask, claimed, err)
+	}
+	if thirdTask.PriorTranscriptRef.ObjectID != "" || thirdTask.PriorTranscriptSequence != 0 {
+		t.Fatalf("provider carry skipped the intervening DeepSeek turn and resurrected older Ollama context: ref=%+v sequence=%d", thirdTask.PriorTranscriptRef, thirdTask.PriorTranscriptSequence)
+	}
+}
+
+func TestClaimTaskDoesNotCarryAcrossInterveningFailedTurn(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	createAndClaim := func(name string) (channel.SendResult, agent.TaskContext) {
+		t.Helper()
+		inbound, err := store.CreateInbound(ctx, "cli", testRef(name+"-inbound", name+"-inbound-hash"), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for {
+			wake, ok, err := store.ClaimOutbox(ctx, "worker", time.Minute)
+			if err != nil || !ok {
+				t.Fatalf("%s wake=%+v ok=%t err=%v", name, wake, ok, err)
+			}
+			if err := store.CompleteOutbox(ctx, wake.ID); err != nil {
+				t.Fatal(err)
+			}
+			if wake.Kind == "task.wake" {
+				break
+			}
+		}
+		task, claimed, err := store.ClaimTask(ctx, inbound.TaskID, "worker", time.Minute, "soul", `{}`, "deepseek:model")
+		if err != nil || !claimed {
+			t.Fatalf("%s task=%+v claimed=%t err=%v", name, task, claimed, err)
+		}
+		return inbound, task
+	}
+	deliver := func(name string, task agent.TaskContext, terminal, kind string) {
+		t.Helper()
+		if err := store.MarkRunDispatched(ctx, task.RunID); err != nil {
+			t.Fatal(err)
+		}
+		commit := testCommit(task, testRef(name+"-reply", name+"-reply-hash"), eval.Pass)
+		commit.TerminalStatus = terminal
+		commit.ArtifactKind = kind
+		if terminal == "failed" {
+			commit.FailureCode = "simulated_failure"
+		}
+		if err := store.CommitArtifact(ctx, commit); err != nil {
+			t.Fatal(err)
+		}
+		item, ok, err := store.ClaimOutbox(ctx, "worker", time.Minute)
+		if err != nil || !ok || item.Kind != "delivery.send" {
+			t.Fatalf("%s delivery=%+v ok=%t err=%v", name, item, ok, err)
+		}
+		if err := store.CommitConversationDelivery(ctx, commit.DeliveryID, name+"-outbound", delivery.Receipt{Level: "accepted_by_channel"}, time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.CompleteOutbox(ctx, item.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, firstTask := createAndClaim("first")
+	deliver("first", firstTask, "completed", "text")
+	_, failedTask := createAndClaim("failed")
+	deliver("failed", failedTask, "failed", "runtime_error")
+	_, currentTask := createAndClaim("current")
+	if currentTask.PriorTranscriptRef.ObjectID != "" || currentTask.PriorTranscriptSequence != 0 {
+		t.Fatalf("provider carry skipped an intervening failed turn: ref=%+v sequence=%d", currentTask.PriorTranscriptRef, currentTask.PriorTranscriptSequence)
+	}
+}
+
 func TestEvalAndDeliveryOutboxCommitAtomically(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -976,6 +1197,82 @@ func TestEvalAndDeliveryOutboxCommitAtomically(t *testing.T) {
 	}
 	if _, found, err := store.LoadDelivery(ctx, invalid.DeliveryID); err != nil || !found {
 		t.Fatalf("delivery missing after valid commit: found=%v err=%v", found, err)
+	}
+}
+
+func TestAppliedMemoryUseCommitsAtomicallyWithAcceptedArtifact(t *testing.T) {
+	for _, stale := range []bool{false, true} {
+		t.Run(map[bool]string{false: "accepted", true: "stale"}[stale], func(t *testing.T) {
+			ctx := context.Background()
+			store, err := Open(filepath.Join(t.TempDir(), "eri.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			contentStore, err := content.New(t.TempDir(), []byte("0123456789abcdef0123456789abcdef"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			memoryService, err := memory.NewService(store, contentStore, []byte("0123456789abcdef0123456789abcdef"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			entry, err := memoryService.Capture(ctx, memory.CaptureRequest{
+				Statement: "Keep reports concise.", Kind: "preference", Scope: "communication",
+				Relation: memory.Supports, SourceType: "user", SourceRef: "interaction:memory-source",
+				IndependenceGroup: "user:self", DirectUserStatement: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sent, err := store.CreateInbound(ctx, "web", testRef("memory-atomic-in", "memory-atomic-in-hash"), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			task, claimed, err := store.ClaimTask(ctx, sent.TaskID, "worker", time.Minute, "soul", `{}`, "test:model")
+			if err != nil || !claimed {
+				t.Fatalf("task=%+v claimed=%v err=%v", task, claimed, err)
+			}
+			if err := store.MarkRunDispatched(ctx, task.RunID); err != nil {
+				t.Fatal(err)
+			}
+			bundle, err := memoryService.Recall(ctx, memory.RecallRequest{
+				Query: "concise report", RunID: task.RunID, SourceInteractionID: sent.InteractionID, Limit: 5,
+			})
+			if err != nil || len(bundle.Entries) != 1 {
+				t.Fatalf("bundle=%+v err=%v", bundle, err)
+			}
+			commit := testCommit(task, testRef("memory-atomic-out", "memory-atomic-out-hash"), eval.Pass)
+			commit.AppliedMemoryUses = []agent.MemoryUse{{RetrievalID: bundle.RetrievalID, MemoryIDs: []string{entry.MemoryID}}}
+			if stale {
+				commit.BasisInputSequence = task.InputSequence
+				if _, err := store.CreateInbound(ctx, "web", testRef("memory-atomic-newer", "memory-atomic-newer-hash"), nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err = store.CommitArtifact(ctx, commit)
+			if stale && !errors.Is(err, agent.ErrStaleTaskInput) {
+				t.Fatalf("stale commit error=%v", err)
+			}
+			if !stale && err != nil {
+				t.Fatal(err)
+			}
+			var used, accessCount int
+			if err := store.db.QueryRowContext(ctx, `
+				SELECT retrieval.used, item.access_count
+				FROM memory_retrieval_items retrieval
+				JOIN memory_items item ON item.id = retrieval.memory_id
+				WHERE retrieval.retrieval_id = ? AND retrieval.memory_id = ?`, bundle.RetrievalID, entry.MemoryID).Scan(&used, &accessCount); err != nil {
+				t.Fatal(err)
+			}
+			want := 1
+			if stale {
+				want = 0
+			}
+			if used != want || accessCount != want {
+				t.Fatalf("used=%d access_count=%d want=%d", used, accessCount, want)
+			}
+		})
 	}
 }
 

@@ -131,6 +131,7 @@ func clamp01(value float64) float64 {
 
 type CaptureRequest struct {
 	ClaimID             string    `json:"claim_id,omitempty"`
+	ReplacesMemoryID    string    `json:"replaces_memory_id,omitempty"`
 	Statement           string    `json:"statement"`
 	Evidence            string    `json:"evidence,omitempty"`
 	Kind                string    `json:"kind"`
@@ -150,6 +151,7 @@ type CaptureRequest struct {
 
 type CaptureRecord struct {
 	ClaimID           string
+	ReplacesMemoryID  string
 	ClaimKey          string
 	StatementRef      content.Ref
 	EvidenceID        string
@@ -174,6 +176,7 @@ type CaptureRecord struct {
 type Snapshot struct {
 	MemoryID          string       `json:"memory_id"`
 	ClaimID           string       `json:"claim_id"`
+	ReplacesMemoryID  string       `json:"replaces_memory_id,omitempty"`
 	StatementRef      content.Ref  `json:"-"`
 	Status            BeliefStatus `json:"status"`
 	Confidence        float64      `json:"confidence"`
@@ -228,8 +231,11 @@ type RecallRequest struct {
 	Scope               string
 	RunID               string
 	SourceInteractionID string
-	Limit               int
-	At                  time.Time
+	// RetrievalID binds a tool-driven read to its durable effect intent. Leave
+	// it empty for automatic Context Assembly recalls, which receive a fresh ID.
+	RetrievalID string
+	Limit       int
+	At          time.Time
 }
 
 type RetrievalRecord struct {
@@ -287,10 +293,11 @@ type Options struct {
 }
 
 type DeletePlan struct {
-	MemoryID    string         `json:"memory_id"`
-	ClaimID     string         `json:"claim_id"`
-	ContentRefs []content.Ref  `json:"-"`
-	Affected    map[string]int `json:"affected"`
+	MemoryID               string         `json:"memory_id"`
+	ClaimID                string         `json:"claim_id"`
+	ContentRefs            []content.Ref  `json:"-"`
+	Affected               map[string]int `json:"affected"`
+	PhysicalCleanupPending bool           `json:"physical_cleanup_pending"`
 }
 
 type CaptureOutcome struct {
@@ -319,7 +326,7 @@ type Repository interface {
 	ConsolidateMemory(context.Context, time.Time, int) (ConsolidationReport, error)
 	SetMemoryUsagePolicy(context.Context, string, string) error
 	PlanDeleteMemory(context.Context, string) (DeletePlan, error)
-	CommitDeleteMemory(context.Context, DeletePlan) error
+	CommitDeleteMemory(context.Context, DeletePlan) (DeletePlan, error)
 	PendingMemoryDeletes(context.Context, int) ([]DeletePlan, error)
 	CompleteDeleteMemory(context.Context, string) error
 }
@@ -378,6 +385,15 @@ func (s *Service) Capture(ctx context.Context, request CaptureRequest) (Entry, e
 	if request.Relation != Supports && request.Relation != Contradicts && request.Relation != Qualifies {
 		return Entry{}, fmt.Errorf("memory relation is invalid")
 	}
+	if request.ReplacesMemoryID != "" && request.ClaimID != "" {
+		return Entry{}, fmt.Errorf("memory replacement cannot also update an existing claim")
+	}
+	if request.ReplacesMemoryID != "" && request.Relation != Supports {
+		return Entry{}, fmt.Errorf("replacement memory must be recorded as a supported new claim")
+	}
+	if request.ReplacesMemoryID != "" && !request.DirectUserStatement && !request.ExplicitUserMemory {
+		return Entry{}, fmt.Errorf("replacement memory requires authoritative direct user evidence")
+	}
 	if request.SourceType == "" || request.SourceRef == "" || request.IndependenceGroup == "" {
 		return Entry{}, fmt.Errorf("memory source type, source ref and independence group are required")
 	}
@@ -430,8 +446,9 @@ func (s *Service) Capture(ctx context.Context, request CaptureRequest) (Entry, e
 		}
 	}()
 	record := CaptureRecord{
-		ClaimID: claimID, ClaimKey: s.key("claim:" + normalize(request.Statement)), StatementRef: statementRef,
-		EvidenceID: evidenceID, EvidenceKey: s.key("evidence:" + normalize(request.Statement) + "\x00" + request.SourceRef + "\x00" + request.IndependenceGroup + "\x00" + string(request.Relation) + "\x00" + normalize(request.Evidence)),
+		ClaimID: claimID, ReplacesMemoryID: request.ReplacesMemoryID,
+		ClaimKey: s.key(claimKeyMaterial(request)), StatementRef: statementRef,
+		EvidenceID: evidenceID, EvidenceKey: s.key(evidenceKeyMaterial(request)),
 		EvidenceRef: evidenceRef, Kind: request.Kind, Scope: request.Scope, Relation: request.Relation,
 		SourceType: request.SourceType, SourceRef: request.SourceRef, IndependenceGroup: request.IndependenceGroup,
 		Reliability: clamp01(request.Reliability), Directness: clamp01(request.Directness), Verifiability: clamp01(request.Verifiability),
@@ -460,6 +477,29 @@ func (s *Service) Capture(ctx context.Context, request CaptureRequest) (Entry, e
 		}
 	}
 	return entry, nil
+}
+
+func claimKeyMaterial(request CaptureRequest) string {
+	material := "claim:" + normalize(request.Statement)
+	if request.ReplacesMemoryID != "" {
+		// A replacement is a new immutable revision even when its statement is
+		// textually identical to an older or unrelated Claim. The predecessor is
+		// therefore part of revision identity, while ordinary writes retain their
+		// existing semantic deduplication key.
+		material += "\x00replaces:" + request.ReplacesMemoryID
+	}
+	return material
+}
+
+func evidenceKeyMaterial(request CaptureRequest) string {
+	material := "evidence:" + normalize(request.Statement) + "\x00" + request.SourceRef + "\x00" +
+		request.IndependenceGroup + "\x00" + string(request.Relation) + "\x00" + normalize(request.Evidence)
+	if request.ReplacesMemoryID != "" {
+		// One authoritative statement may correct more than one distinct Memory;
+		// its Evidence records must not collide across those revision lineages.
+		material += "\x00replaces:" + request.ReplacesMemoryID
+	}
+	return material
 }
 
 func (s *Service) Recall(ctx context.Context, request RecallRequest) (_ Bundle, resultErr error) {
@@ -537,9 +577,13 @@ func (s *Service) Recall(ctx context.Context, request RecallRequest) (_ Bundle, 
 	injectedCount = min(request.Limit, len(ranked))
 	bundle.Entries = append([]Entry(nil), ranked[:injectedCount]...)
 	if request.RunID != "" && request.SourceInteractionID != "" && len(ranked) > 0 {
-		retrievalID, err := identifier.New()
-		if err != nil {
-			return Bundle{}, err
+		retrievalID := strings.TrimSpace(request.RetrievalID)
+		if retrievalID == "" {
+			var err error
+			retrievalID, err = identifier.New()
+			if err != nil {
+				return Bundle{}, err
+			}
 		}
 		bundle.RetrievalID = retrievalID
 		items := make([]RetrievalItem, 0, len(ranked))
@@ -574,14 +618,51 @@ func (s *Service) MarkUsed(ctx context.Context, retrievalID string, memoryIDs []
 }
 
 func (s *Service) Inspect(ctx context.Context, limit int) (Bundle, error) {
-	if _, err := s.repository.ConsolidateMemory(ctx, time.Now().UTC(), 500); err != nil {
-		return Bundle{}, err
+	return s.InspectForRun(ctx, RecallRequest{Limit: limit})
+}
+
+// InspectForRun is a side-effect-free Memory read apart from its durable
+// provenance record. Lifecycle consolidation is owned by explicit/background
+// maintenance, never hidden inside a model-visible read-only operation.
+func (s *Service) InspectForRun(ctx context.Context, request RecallRequest) (Bundle, error) {
+	if request.At.IsZero() {
+		request.At = time.Now().UTC()
 	}
-	candidates, err := s.repository.InspectMemory(ctx, clampLimit(limit))
+	request.Limit = clampLimit(request.Limit)
+	candidates, err := s.repository.InspectMemory(ctx, request.Limit)
 	if err != nil {
 		return Bundle{}, err
 	}
-	return s.resolve(ctx, candidates)
+	bundle, err := s.resolve(ctx, candidates)
+	if err != nil {
+		return Bundle{}, err
+	}
+	bundle.RetrievedIDs = make([]string, 0, len(bundle.Entries))
+	for _, entry := range bundle.Entries {
+		bundle.RetrievedIDs = append(bundle.RetrievedIDs, entry.MemoryID)
+	}
+	if request.RunID != "" && request.SourceInteractionID != "" && len(bundle.Entries) > 0 {
+		retrievalID := strings.TrimSpace(request.RetrievalID)
+		if retrievalID == "" {
+			var err error
+			retrievalID, err = identifier.New()
+			if err != nil {
+				return Bundle{}, err
+			}
+		}
+		bundle.RetrievalID = retrievalID
+		items := make([]RetrievalItem, 0, len(bundle.Entries))
+		for rank, entry := range bundle.Entries {
+			items = append(items, RetrievalItem{MemoryID: entry.MemoryID, Rank: rank + 1, Reasons: []string{"manual_list"}, Injected: true})
+		}
+		if err := s.repository.RecordMemoryRetrieval(ctx, RetrievalRecord{
+			ID: retrievalID, RunID: request.RunID, SourceInteractionID: request.SourceInteractionID,
+			QueryKey: s.key("inspect:all"), CreatedAt: request.At.UTC(), Items: items,
+		}); err != nil {
+			return Bundle{}, err
+		}
+	}
+	return bundle, nil
 }
 
 func (s *Service) Promote(ctx context.Context, memoryID string) error {
@@ -607,17 +688,24 @@ func (s *Service) Delete(ctx context.Context, memoryID string) (DeletePlan, erro
 	if err != nil {
 		return DeletePlan{}, err
 	}
-	if err := s.repository.CommitDeleteMemory(ctx, plan); err != nil {
+	plan, err = s.repository.CommitDeleteMemory(ctx, plan)
+	if err != nil {
 		return DeletePlan{}, err
 	}
+	cleanupPending := false
 	for _, ref := range plan.ContentRefs {
 		if err := s.content.Delete(ctx, ref); err != nil {
-			return DeletePlan{}, fmt.Errorf("delete memory content: %w", err)
+			cleanupPending = true
+			s.logger.Warn("physical Memory cleanup deferred after logical deletion", "component", "memory", "memory_id", memoryID, "error_code", "content_delete_deferred")
 		}
 	}
-	if err := s.repository.CompleteDeleteMemory(ctx, memoryID); err != nil {
-		return DeletePlan{}, err
+	if !cleanupPending {
+		if err := s.repository.CompleteDeleteMemory(ctx, memoryID); err != nil {
+			cleanupPending = true
+			s.logger.Warn("Memory deletion completion marker deferred", "component", "memory", "memory_id", memoryID, "error_code", "delete_completion_deferred")
+		}
 	}
+	plan.PhysicalCleanupPending = cleanupPending
 	return plan, nil
 }
 

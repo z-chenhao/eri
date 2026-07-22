@@ -402,14 +402,14 @@ func (c *Catalog) Diagnostics() []Diagnostic {
 }
 
 // Prompt discloses tier-one metadata only. Full instructions are available
-// through builtin.skills after the model chooses a matching skill.
+// through the model-visible skills Tool after the model chooses a match.
 func (c *Catalog) Prompt(ctx context.Context) (string, error) {
 	items, err := c.Available(ctx)
 	if err != nil || len(items) == 0 {
 		return "", err
 	}
 	var body strings.Builder
-	body.WriteString("\n\nThe following Agent Skills provide specialized instructions. When a task matches a description, call builtin.skills with operation=load and the skill name before proceeding. Load referenced resources only when needed.\n<available_skills>\n")
+	body.WriteString("\n\nThe following Agent Skills provide specialized instructions. When a task matches a description, call skills with operation=load and the skill name before proceeding. Load referenced resources only when needed.\n<available_skills>\n")
 	for _, item := range items {
 		encodedName, _ := xml.Marshal(struct {
 			XMLName xml.Name `xml:"name"`

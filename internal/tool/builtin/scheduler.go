@@ -27,8 +27,8 @@ type Scheduler struct {
 
 type schedulerInput struct {
 	Operation     string             `json:"operation"`
-	CommitmentID  string             `json:"commitment_id,omitempty"`
-	Message       string             `json:"message,omitempty"`
+	ID            string             `json:"id,omitempty"`
+	Task          string             `json:"task,omitempty"`
 	Schedule      scheduler.Schedule `json:"schedule,omitempty"`
 	Importance    string             `json:"importance,omitempty"`
 	DeliveryRoute string             `json:"delivery_route,omitempty"`
@@ -44,19 +44,20 @@ func NewScheduler(service SchedulerService) (*Scheduler, error) {
 
 func (s *Scheduler) Descriptor() tool.Descriptor {
 	return tool.Descriptor{
-		ID: "builtin.commitments", Version: "0.4.0",
-		Purpose: "Create, update, inspect, pause, resume or cancel durable reminders and recurring commitments. A due commitment wakes the same Eri Agent Loop; do not create one unless the user has agreed to the ongoing work. When the user refines or corrects a commitment just created, update that commitment_id instead of creating an overlapping commitment. Use origin_channel when the user explicitly asks in the current conversation for a reminder. Use recent_channel for ongoing proactive work first proposed by Eri and then accepted by the user, so each future delivery follows the user's latest trusted conversation channel.",
+		ID: "builtin.commitments", Version: "0.5.0",
+		Purpose: "Schedule, update, list, pause, resume, or cancel a durable reminder or recurring assignment. Store what Eri must do when the schedule fires, not wording to send later; Eri will compose the response from that task and the current conversation. Use the returned id when the user refines an existing schedule. Use origin_channel for a user-requested reminder and recent_channel only for ongoing proactive work first proposed by Eri and accepted by the user.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"operation":     map[string]any{"type": "string", "enum": []string{"create", "update", "list", "pause", "resume", "cancel"}},
-				"commitment_id": map[string]any{"type": "string"}, "message": map[string]any{"type": "string"},
+				"operation":  map[string]any{"type": "string", "enum": []string{"create", "update", "list", "pause", "resume", "cancel"}},
+				"id":         map[string]any{"type": "string"},
+				"task":       map[string]any{"type": "string", "maxLength": 16384, "description": "The assignment to carry out when due, not a prewritten future reply"},
 				"importance": map[string]any{"type": "string", "enum": []string{"normal", "important"}},
 				"delivery_route": map[string]any{
 					"type": "string", "enum": []string{scheduler.DeliveryRouteOrigin, scheduler.DeliveryRouteRecent},
 					"description": "origin_channel for a user-requested reminder; recent_channel for Eri-proposed proactive work accepted by the user",
 				},
-				"limit": map[string]any{"type": "integer"},
+				"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 20},
 				"schedule": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -91,13 +92,13 @@ func (s *Scheduler) Prepare(_ context.Context, raw json.RawMessage) (tool.Prepar
 	case "list":
 	case "create", "update":
 		action.Effect = policy.Reversible
-		if input.Message == "" || input.Schedule.Type == "" {
-			return tool.Prepared{}, fmt.Errorf("message and schedule are required")
+		if input.Task == "" || input.Schedule.Type == "" {
+			return tool.Prepared{}, fmt.Errorf("task and schedule are required")
 		}
 		if input.Operation == "update" {
-			action.Target = "commitment:" + input.CommitmentID
-			if input.CommitmentID == "" {
-				return tool.Prepared{}, fmt.Errorf("commitment_id is required")
+			action.Target = "commitment:" + input.ID
+			if input.ID == "" {
+				return tool.Prepared{}, fmt.Errorf("id is required")
 			}
 			if input.Importance == "" || input.DeliveryRoute == "" {
 				return tool.Prepared{}, fmt.Errorf("importance and delivery_route are required for update")
@@ -105,12 +106,12 @@ func (s *Scheduler) Prepare(_ context.Context, raw json.RawMessage) (tool.Prepar
 		}
 	case "pause", "resume", "cancel":
 		action.Effect = policy.Reversible
-		action.Target = "commitment:" + input.CommitmentID
-		if input.CommitmentID == "" {
-			return tool.Prepared{}, fmt.Errorf("commitment_id is required")
+		action.Target = "commitment:" + input.ID
+		if input.ID == "" {
+			return tool.Prepared{}, fmt.Errorf("id is required")
 		}
 	default:
-		return tool.Prepared{}, fmt.Errorf("unsupported commitment operation %q", input.Operation)
+		return tool.Prepared{}, fmt.Errorf("unsupported schedule operation %q", input.Operation)
 	}
 	normalized, err := json.Marshal(input)
 	if err != nil {
@@ -129,23 +130,23 @@ func (s *Scheduler) Execute(ctx context.Context, prepared tool.Prepared) (tool.R
 	switch input.Operation {
 	case "create":
 		output, err = s.service.Create(ctx, prepared.TaskID, scheduler.CreateRequest{
-			Message: input.Message, Schedule: input.Schedule, Importance: input.Importance, DeliveryRoute: input.DeliveryRoute,
+			Task: input.Task, Schedule: input.Schedule, Importance: input.Importance, DeliveryRoute: input.DeliveryRoute,
 		})
 	case "update":
-		output, err = s.service.Update(ctx, prepared.TaskID, input.CommitmentID, scheduler.CreateRequest{
-			Message: input.Message, Schedule: input.Schedule, Importance: input.Importance, DeliveryRoute: input.DeliveryRoute,
+		output, err = s.service.Update(ctx, prepared.TaskID, input.ID, scheduler.CreateRequest{
+			Task: input.Task, Schedule: input.Schedule, Importance: input.Importance, DeliveryRoute: input.DeliveryRoute,
 		})
 	case "list":
 		output, err = s.service.List(ctx, input.Limit)
 	case "pause":
-		err = s.service.SetStatus(ctx, input.CommitmentID, "paused")
-		output = map[string]any{"commitment_id": input.CommitmentID, "status": "paused"}
+		err = s.service.SetStatus(ctx, input.ID, "paused")
+		output = map[string]any{"id": input.ID, "status": "paused"}
 	case "resume":
-		err = s.service.SetStatus(ctx, input.CommitmentID, "active")
-		output = map[string]any{"commitment_id": input.CommitmentID, "status": "active"}
+		err = s.service.SetStatus(ctx, input.ID, "active")
+		output = map[string]any{"id": input.ID, "status": "active"}
 	case "cancel":
-		err = s.service.SetStatus(ctx, input.CommitmentID, "canceled")
-		output = map[string]any{"commitment_id": input.CommitmentID, "status": "canceled"}
+		err = s.service.SetStatus(ctx, input.ID, "canceled")
+		output = map[string]any{"id": input.ID, "status": "canceled"}
 	}
 	if err != nil {
 		return tool.Result{}, err

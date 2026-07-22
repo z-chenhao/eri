@@ -40,7 +40,7 @@ func NewFeedback(service FeedbackService) (*Feedback, error) {
 func (f *Feedback) Descriptor() tool.Descriptor {
 	return tool.Descriptor{
 		ID: "builtin.feedback", Version: "0.1.0",
-		Purpose: "Record explicit user correction, acceptance, rejection, or real-world outcome for a previously delivered Eri answer. This Tool Call is required before acknowledging clear post-delivery feedback in text; a verbal promise to improve is not a feedback record. Omit delivery_id to link the latest prior delivered answer. When the feedback also states a durable personal preference, record that preference separately with builtin.memory.",
+		Purpose: "Record explicit user correction, acceptance, rejection, or real-world outcome for a previously delivered Eri answer. This Tool Call is required before acknowledging clear post-delivery feedback in text; a verbal promise to improve is not a feedback record. Omit delivery_id to link the latest prior delivered answer. When the feedback also states a durable personal preference, record that preference separately with memory.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

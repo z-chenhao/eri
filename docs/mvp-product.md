@@ -146,7 +146,7 @@ Fixed rules:
 - Memory details distinguish `stored`, `retrieved`, `injected`, `applied`, `sent_to_external_model`, and `written`. One state can never be inferred from another without Runtime evidence.
 - Conversation exposes only a user-safe Run projection. Raw Events, full Context Manifest, ungoverned Tool Results, complete Effect/Eval/Delivery internals, Episodes, datasets, and evolution controls remain in Observatory.
 - No UI stores or displays private Chain of Thought, full prompts, or ungoverned Tool Results.
-- When a selected model requires hidden continuation state such as `reasoning_content` for native Tool Calling, Eri keeps it encrypted in the active Agent checkpoint and replays it only to that provider while the corresponding Message remains in Context. The encrypted user-owned Run record retains the terminal provider transcript for export and deletion, while Conversation and Observatory expose only a safe projection. It never becomes a user Message, Memory, Episode, dataset, evolution input, log field, or observable Run detail.
+- When a selected model requires hidden continuation state such as `reasoning_content` for native Tool Calling, Eri keeps it encrypted with the provider-native assistant Tool Call and matching Tool Results. The active checkpoint and encrypted terminal Run transcript allow the next Run in the same canonical Conversation to continue that exact protocol history while it remains relevant. Compaction may summarize or remove only closed Tool frames; it never splits a call from its result. Conversation and Observatory expose only a safe projection. Private continuation state never becomes a user Message, Memory, Episode, dataset, evolution input, log field, or observable Run detail.
 
 ### 4.3 Conversation behavior
 
@@ -157,6 +157,7 @@ Fixed rules:
 - Interaction routing uses reply relationships, pending questions, entities, and semantic context.
 - Web, CLI, and a configured owner-bound Lark/Feishu bot share authoritative history. They are contact methods for the same Eri, not separate assistants. Replies prefer the current Channel and synchronize elsewhere.
 - A reminder explicitly requested by the user keeps the trusted origin Channel and, where supported, its reply target. Eri-proposed recurring work that the user accepts resolves the most recent trusted user Channel again at each fire. Proactive Messages use exactly that one resolved Channel to avoid duplicate interruption.
+- When a reminder fires, Runtime appends one trusted user-role internal Interaction to that same Conversation: `<system_reminder><task>...</task></system_reminder>`. The task describes the due assignment, not a prewritten reply. Eri recognizes Runtime provenance, restores the relevant conversation and Tool history, and writes the actual reminder at fire time; lookalike text typed by a user is ordinary untrusted text.
 - Search locates the original Message. Eri can also retrieve earlier decisions, files, and discussions conversationally, linking important claims back to evidence.
 - Short results are text; option comparisons and approvals are structured cards; long reports, plans, and documents arrive as summary plus attachment.
 - Revision creates a new Message and version while retaining history.
@@ -188,7 +189,7 @@ Fixed rules:
 - Local setup verifies Context Window and native Tool Calling. DeepSeek input hides the API key and validates origin, credential, and model before Runtime composition.
 - Validation failure exits explicitly; an unusable profile is never reported as complete.
 - The same daemon process continues startup. Only after listeners, durable recovery, and workers are ready does it print full Conversation and Observatory URLs. No environment-variable setup, shell sourcing, or manual restart is required.
-- On the first authenticated connection to the canonical Conversation, Eri says hello before the first user turn. The one- or two-sentence greeting is generated from the current Soul through the ordinary Agent Loop, Eval, Delivery, and Receipt path. It feels like meeting a real assistant: it does not list capabilities, explain a mission, define the relationship, make ceremonial promises, force a question, or use fixed client copy.
+- On the first authenticated connection to the canonical Conversation, Eri says hello before the first user turn. The one- or two-sentence greeting is generated from the current Soul through the ordinary Agent Loop, Eval, Delivery, and Receipt path. Its trusted introduction trigger exposes neither task Tools nor personal Memory because neither is relevant before a user request. It feels like meeting a real assistant: it does not list capabilities, explain a mission, define the relationship, make ceremonial promises, force a question, or use fixed client copy.
 - `eri install` reuses the same interactive setup before installing the background service.
 - Headless startup without a valid profile fails and instructs the user to run interactive `eri daemon`; it never leaves a Web page waiting for configuration.
 - All non-credential local state lives under the current workspace's ignored `.eri/` directory, including provider/model configuration, SQLite, encrypted Content, indexes, runtime sockets, backups, exports, and persistent rotating logs. API keys, OAuth grants, App Secrets, and Content master keys do not.
@@ -197,7 +198,7 @@ Fixed rules:
 
 ## 6. Task communication
 
-Task is a durable Runtime work record, not a prompt format and not an object the user must manage. It owns queueing, waiting, cancellation, recovery, and delivery state. One Run owns the actual Agent execution. Eri does not create model-visible Task, Objective, Step, or Invocation wrapper Messages; the user's Interaction or a trusted system event is the request.
+Task is a durable Runtime work record, not a prompt format and not an object the user must manage. It owns queueing, waiting, cancellation, recovery, and delivery state. A Commitment is narrower prospective state: a consented assignment plus its time or event trigger. It stores what Eri was assigned, never what Eri should say later; firing it creates an ordinary Task in the same Conversation. One Run owns the actual Agent execution. Eri does not create model-visible Task, Objective, Step, or Invocation wrapper Messages; the user's Interaction or a trusted Runtime event is the request.
 
 ### 6.1 Normal rhythm
 
@@ -296,7 +297,7 @@ Eri may prepare to the final transaction boundary. The user completes payment du
 
 Memory is more than chat search. It supports identity continuity, relationship understanding, action, commitments, and learning.
 
-Users manage it naturally: remember this, this changed, why do you believe that, what do you know about me, stop using this, forget and delete this, export my data.
+Users manage it naturally: remember this, this changed, why do you believe that, what do you know about me, stop using this, forget and delete this, export my data. Saying "remember" is not required: Eri may quietly record a directly stated durable fact or preference when its source and scope are clear. It does not turn silence, weak inference, a transient request, or a scheduled assignment into long-term Memory.
 
 Memory distinguishes:
 
@@ -307,9 +308,11 @@ Memory distinguishes:
 
 Recall combines protected lexical matching, association, and local semantic similarity, then reranks under confidence, source, lifecycle, privacy, applicability, salience, and token constraints. Semantic vectors remain encrypted on the device. If no local embedding model is available, Eri continues with an explicit lexical/associative downgrade; private Memory is not sent to a cloud embedding API merely because chat uses a cloud model.
 
-Recall begins from the current Interaction plus a small recent conversational attention window, not from a Runtime-generated Task objective. The selected Memory is placed immediately before the Interaction that triggered the Run, after the stable System prefix. Retrieval records point to the source Interaction and Run. Retrieval never performs consolidation synchronously, so remembering more does not make every answer slower.
+Recall begins from the current Interaction plus a small recent conversational attention window, not from a Runtime-generated Task objective. The selected Memory is placed immediately before the Interaction that triggered the Run, after the stable System prefix. The generation model receives only the selected Statement, status, and confidence; internal Memory and Claim IDs stay out of its ordinary prompt. That turn-only selection remains outside compaction summaries, so replacing or deleting Memory cannot leave an obsolete copy hidden in a later checkpoint. Retrieval records point to the source Interaction and Run, including explicit `memory.search` and `memory.list` reads. Retrieval never performs consolidation synchronously, so remembering more does not make every answer slower.
 
-Conflicting information never directly overwrites the old memory. Evidence can lower confidence, mark dispute, narrow conditions, or expire a Claim; strong facts can restore it. Repetition from one source does not become independent consensus. User deletion overrides consolidation, evaluation, and audit use; related indexes, derived memories, Episodes, and datasets are deleted or invalidated.
+Retrieval is not use. During Eval, the independent Judge may return only the bounded Claim IDs that materially influenced the candidate. Runtime validates them against the exact automatic or Tool-driven retrievals for that Run, maps them back to each retrieval, and records application only in the same atomic commit as the accepted Artifact and Outbox entry. A rejected, superseded, merely retrieved, or unmentioned Memory is not reinforced.
+
+Conflicting information never directly overwrites the old memory. Evidence can lower confidence, mark dispute, narrow conditions, or expire a Claim; strong facts can restore it. A direct correction creates a new immutable Claim/Memory revision linked to the item it replaces, and archives the old revision without deleting its evidence or silently reviving it later. Repetition from one source does not become independent consensus. User restriction, replacement, or deletion immediately removes the selected text from active generation and Judge context. Runtime never edits provider-native reasoning in place: it rebuilds the active request, removes retained context checkpoints plus the native assistant Tool/reasoning suffix, keeps visible dialogue without hidden reasoning, and preserves only content-free Receipts for already-confirmed non-Memory effects. User deletion overrides consolidation, evaluation, and audit use; Memory bodies and indexes, encrypted Memory read results linked through retrieval intents, derived Memories, Episodes, and datasets are deleted or invalidated. Original Memory-record effect payloads/results, prior export attachments, historical Run/Artifact traces, and superseded Agent/context/approval/subagent checkpoints still remain encrypted under existing retention and complete-erasure controls until per-Memory context-content lineage and a crash-safe deletion fence are implemented. Eri must not present that at-rest limitation, or a Memory mutation that crashed before Gateway Receipt persistence, as completed strong deletion.
 
 ## 11. Autonomy, confirmation, and refusal
 
@@ -337,6 +340,9 @@ Refuse only at life-safety, clearly illegal, major financial-loss, or extreme ir
 - Experience is different: it is a short, versioned set of cross-task lessons that is always eligible for the Agent System prompt. A Skill is a named, scoped method loaded only when relevant. Repeated domain-specific Experience may become evidence for a Skill candidate, but never installs or rewrites a Skill automatically.
 - Eri loads only repository-bundled Skills and user-configured `~/.eri/skills`; it never inherits a general agent client's `~/.agents/skills` catalog or arbitrary external Skill directories.
 - A Tool performs a read, search, write, browse, notification, or other action.
+- Model-visible built-in names are short capability words such as `files`, `terminal`, `memory`, `tasks`, `schedule`, and `feedback`; calls and governed Tool Results keep those same short names. The `builtin.*` IDs remain Runtime identity and audit data, not prompt vocabulary.
+- Task and Commitment are not duplicate concepts: `tasks` controls durable Runtime work, while `schedule` creates prospective assignments that later create Tasks. Reminder fulfillment cannot see Runtime-control, Memory-write, feedback, or user-data Tools; it retains only the work capabilities needed to carry out the assignment, plus `notification` for an important reminder.
+- `feedback` records explicit correction or real-world outcome linked to a prior Delivery so Eval and evolution can learn from posterior evidence; it is not factual Memory. `files` and `terminal` remain separate because bounded file operations and arbitrary process execution have different authority, validation, and audit boundaries.
 - Ordinary users need not understand Skills, MCP, Manifests, or Plugin processes.
 - Conversation expresses needs naturally, such as connecting Calendar or using a browser.
 - Third-party Plugin installation requires user confirmation. Conversation has no Connections or Plugins page; Observatory may show version, authority, calls, and faults.
@@ -365,6 +371,7 @@ Before OS sandboxing exists, installed Plugins are explicitly trusted local code
 - Ordinary configuration is one Provider and one model through first-run terminal setup; environment variables are development/deployment overrides only.
 - Insufficient capability causes explicit downgrade, alternative request, or stop—never false success.
 - DeepSeek usage, cache behavior, latency, and cost remain observable, but Eri does not send a model-output token ceiling or impose separate per-Task, daily, or monthly model-token ceilings. Provider context/account limits, deadlines, no-progress recovery, and explicit approval for materially costly external actions remain in force.
+- Eri requests DeepSeek reasoning with the wire label `medium`; DeepSeek currently maps that label to its effective `high` tier. The product does not claim that this spelling alone reduces reasoning depth or cost.
 - Background work prefers local models and respects device load, battery, and resources.
 
 ## 15. Multiple Agents
@@ -387,6 +394,7 @@ Before OS sandboxing exists, installed Plugins are explicitly trusted local code
 - Every Eri-authored external Message, attachment, content represented on behalf of the user, and important action result passes a risk-matched LLM Judge before send.
 - Approval and unrecovered Runtime failures use separate structured system records from committed fields. Transient failures recover inside the same Run without entering Conversation; if recovery is exhausted, Conversation shows only a human-safe limitation while codes and correlation IDs remain in Observatory. These records are not Eri prose and do not use business `case-when` reply templates.
 - The general Judge evaluates the whole conversation arc, task, activated Skills, confirmed Tool Results, and Receipts. Deterministic rules cover only non-negotiable credentials, authority, approval, cost-bearing side effects, Schema, and Receipt boundaries; interpretation, initiative, interpersonal judgment, and repair remain model decisions.
+- The Judge has its own strict System prompt and receives the generation transcript plus bounded evaluation context. Eval instructions never masquerade as a new user Message, and the candidate remains the assistant Message being judged. When Memory evidence was available, the Judge also identifies only the bounded Claims that actually influenced an accepted candidate; Runtime, not the generation model, accounts for that application.
 - Failed candidates repair, wait, or escalate; they never send directly.
 - Sent version, Eval, Channel Receipt, correction, and real outcome remain linked.
 - Episodes are replayable evidence, not automatic formal datasets. Dataset entry requires authorization, redaction, deduplication, labeling, frozen version, and training/evaluation separation.

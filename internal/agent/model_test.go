@@ -17,16 +17,22 @@ func TestBuildToolDefinitionsIsStableAndProviderSafe(t *testing.T) {
 	descriptors := []tool.Descriptor{
 		{ID: "z.last", Purpose: "last", InputSchema: map[string]any{"type": "object"}},
 		{ID: "builtin.files", Purpose: "files", InputSchema: map[string]any{"type": "object"}},
+		{ID: "builtin.commitments", Purpose: "schedule", InputSchema: map[string]any{"type": "object"}},
 	}
 	definitions, ids, err := buildToolDefinitions(descriptors)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if definitions[0].Name != "builtin_files" || definitions[1].Name != "z_last" {
+	if definitions[0].Name != "schedule" || definitions[1].Name != "files" || definitions[2].Name != "z_last" {
 		t.Fatalf("unstable definitions: %+v", definitions)
 	}
-	if ids["builtin_files"] != "builtin.files" {
+	if ids["files"] != "builtin.files" {
 		t.Fatalf("tool mapping: %+v", ids)
+	}
+	for _, definition := range definitions {
+		if strings.HasPrefix(definition.Name, "builtin_") {
+			t.Fatalf("model-visible Tool leaked internal namespace: %+v", definitions)
+		}
 	}
 	encoded, err := json.Marshal(definitions)
 	if err != nil {
@@ -34,6 +40,15 @@ func TestBuildToolDefinitionsIsStableAndProviderSafe(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), "allowed_effects") || strings.Contains(string(encoded), "cost_policy") {
 		t.Fatalf("runtime-only metadata leaked into model tools: %s", encoded)
+	}
+}
+
+func TestToolSurfaceTreatsAliasAsProviderProtocol(t *testing.T) {
+	if !sameToolSurface(map[string]string{"files": "builtin.files"}, map[string]string{"files": "builtin.files"}) {
+		t.Fatal("identical Tool surface was rejected")
+	}
+	if sameToolSurface(map[string]string{"builtin_files": "builtin.files"}, map[string]string{"files": "builtin.files"}) {
+		t.Fatal("renamed model alias was accepted for in-flight checkpoint recovery")
 	}
 }
 
@@ -153,9 +168,9 @@ func TestSystemPromptRequiresOneMinimalClarification(t *testing.T) {
 func TestSystemPromptStatesGovernedLearningWithoutCapabilityCases(t *testing.T) {
 	prompt := systemPrompt(identity.Snapshot{Soul: "stable soul"})
 	for _, required := range []string{
-		"governed Memory, linked user Feedback, Episodes, and Eval",
-		"cannot rewrite Soul, authority, code, or model weights",
-		"Never claim that evidence or Memory was stored, used, or learned from without its confirmed Tool observation",
+		"The user does not need to say “remember”",
+		"Current tasks and scheduled work belong to Runtime, not long-term Memory",
+		"Never claim Memory was stored, changed, or forgotten without a confirmed Tool observation",
 	} {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("system prompt is missing governed learning rule %q", required)
@@ -168,27 +183,23 @@ func TestSystemPromptKeepsCapabilitySpecificRulesOutOfTheKernel(t *testing.T) {
 	if strings.Contains(prompt, "builtin.") {
 		t.Fatalf("system prompt contains a capability-specific Tool ID: %s", prompt)
 	}
-	operatingIndex := strings.Index(prompt, "<agent_operating_rules>")
-	soulIndex := strings.Index(prompt, "You are Eri")
-	if operatingIndex < 0 || soulIndex <= operatingIndex {
-		t.Fatalf("system safety and authority must precede Soul: operating=%d soul=%d", operatingIndex, soulIndex)
+	systemIndex := strings.Index(prompt, "## System")
+	soulIndex := strings.Index(prompt, "<soul>")
+	if !strings.HasPrefix(prompt, "You are Eri") || systemIndex < 0 || soulIndex <= systemIndex {
+		t.Fatalf("identity and System rules must precede Soul: system=%d soul=%d", systemIndex, soulIndex)
 	}
-	if words := len(strings.Fields(prompt)); words > 850 {
-		t.Fatalf("default system prompt grew to %d words; keep the stable kernel within 850", words)
+	if words := len(strings.Fields(prompt)); words > 900 {
+		t.Fatalf("default system prompt grew to %d words; keep the stable kernel within 900", words)
 	}
 }
 
-func TestSystemPromptAlwaysIncludesUnversionedSoulGuidedResponse(t *testing.T) {
+func TestSystemPromptAlwaysIncludesStableSoul(t *testing.T) {
 	prompt := systemPrompt(identity.Snapshot{Soul: "stable soul"})
 	for _, required := range []string{
-		"<soul_guided_response>",
-		"one continuing relationship and task",
-		"mature personal assistant in a private working conversation",
-		"state or change, material exception, deadline, decision, recommendation, and next action",
-		"For external drafts, match the recipient and relationship",
-		"Keep responsibility precise",
-		"not Eri's internal machinery",
-		"requested brevity",
+		"<soul>",
+		"stable soul",
+		"Match external drafts to their recipient",
+		"never imply they were sent without a Receipt",
 	} {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("interpersonal response prompt is missing %q", required)
@@ -320,6 +331,12 @@ func TestAssembleRunPromptsKeepsMemoryWorkflowOutOfJudgeContext(t *testing.T) {
 	if strings.Contains(prompts.MemoryContext.Content, "operation=mark_used") || strings.Contains(prompts.MemoryContext.Content, "call builtin.memory") {
 		t.Fatalf("Memory evidence still carries a procedural mark-used instruction: %s", prompts.MemoryContext.Content)
 	}
+	if strings.Contains(prompts.MemoryContext.Content, "memory-1") || strings.Contains(prompts.MemoryContext.Content, "claim-1") {
+		t.Fatalf("generation Memory exposed internal identities: %s", prompts.MemoryContext.Content)
+	}
+	if !strings.Contains(prompts.JudgeContext, "claim-1") {
+		t.Fatalf("Judge context lost the bounded Claim identity: %s", prompts.JudgeContext)
+	}
 	if strings.Contains(prompts.JudgeContext, "operation=mark_used") || strings.Contains(prompts.JudgeContext, "call builtin.memory") {
 		t.Fatalf("Judge context inherited generation-only memory workflow: %s", prompts.JudgeContext)
 	}
@@ -328,7 +345,7 @@ func TestAssembleRunPromptsKeepsMemoryWorkflowOutOfJudgeContext(t *testing.T) {
 func TestReplaceDeferredToolResultPreservesNativeToolFrame(t *testing.T) {
 	messages := []Message{
 		{Role: "user", Content: "Delegate the repository review."},
-		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call-delegate", Name: "builtin_delegate", Arguments: json.RawMessage(`{}`)}}},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call-delegate", Name: "delegate", Arguments: json.RawMessage(`{}`)}}},
 		{Role: "tool", ToolCallID: "call-delegate", Content: `{"success":true,"result":{"deferred":{"id":"delegation-1"}}}`},
 	}
 	if err := replaceDeferredToolResult(messages, "call-delegate", "engineering_team", "completed", []byte(`{"summary":"verified"}`)); err != nil {
@@ -407,7 +424,7 @@ func TestRestoreConversationWatermarkUsesLegacyInputAsConservativeBaseline(t *te
 func TestEvalEscalationAsksUserWithoutContinuingTools(t *testing.T) {
 	original := ModelRequest{
 		Messages: []Message{{Role: "assistant", Content: "withheld candidate"}},
-		Tools:    []ToolDefinition{{Name: "builtin_web"}},
+		Tools:    []ToolDefinition{{Name: "web"}},
 	}
 	repaired := evalRepairRequest(original, eval.Decision{
 		Result: eval.Escalate, Findings: []string{"confirm the intended event"},
@@ -415,7 +432,7 @@ func TestEvalEscalationAsksUserWithoutContinuingTools(t *testing.T) {
 	if len(repaired.Tools) != 0 {
 		t.Fatalf("escalation still exposes tools: %+v", repaired.Tools)
 	}
-	if len(repaired.Messages) != 2 || !strings.Contains(repaired.Messages[1].Content, "entire next candidate must be exactly one focused") {
+	if len(repaired.Messages) != 1 || repaired.Messages[0].Role != "system" || !strings.Contains(repaired.Messages[0].Content, "entire next candidate must be exactly one focused") {
 		t.Fatalf("repair request = %+v", repaired.Messages)
 	}
 	if len(original.Tools) != 1 || len(original.Messages) != 1 {

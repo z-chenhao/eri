@@ -28,9 +28,10 @@ type Record struct {
 }
 
 type Decision struct {
-	Result   Result   `json:"result"`
-	Tier     string   `json:"tier"`
-	Findings []string `json:"findings"`
+	Result              Result   `json:"result"`
+	Tier                string   `json:"tier"`
+	Findings            []string `json:"findings"`
+	AppliedMemoryClaims []string `json:"applied_memory_claims,omitempty"`
 }
 
 func (d Decision) Validate() error {
@@ -52,6 +53,20 @@ func (d Decision) Validate() error {
 	}
 	if len(d.Findings) > 20 {
 		return fmt.Errorf("findings exceed limit")
+	}
+	if len(d.AppliedMemoryClaims) > 5 {
+		return fmt.Errorf("applied memory claims exceed limit")
+	}
+	seenClaims := make(map[string]struct{}, len(d.AppliedMemoryClaims))
+	for _, claimID := range d.AppliedMemoryClaims {
+		claimID = strings.TrimSpace(claimID)
+		if claimID == "" {
+			return fmt.Errorf("applied memory claim id must be non-empty")
+		}
+		if _, exists := seenClaims[claimID]; exists {
+			return fmt.Errorf("applied memory claim ids must be unique")
+		}
+		seenClaims[claimID] = struct{}{}
 	}
 	for _, finding := range d.Findings {
 		if strings.TrimSpace(finding) == "" || len([]byte(finding)) > 2048 {

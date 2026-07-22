@@ -177,7 +177,7 @@ func (m *nativeDelegationIntegrationModel) Complete(_ context.Context, request a
 	usage := agent.Usage{Provider: "fake", Model: "native-delegation", ModelCalls: 1}
 	if strings.Contains(request.System, "private Intern") {
 		for _, definition := range request.Tools {
-			for _, forbidden := range []string{"builtin_delegate", "builtin_notification", "builtin_memory"} {
+			for _, forbidden := range []string{"delegate", "notification", "memory"} {
 				if definition.Name == forbidden {
 					return agent.ModelResponse{}, fmt.Errorf("Intern received forbidden capability %q", forbidden)
 				}
@@ -199,7 +199,7 @@ func (m *nativeDelegationIntegrationModel) Complete(_ context.Context, request a
 	case 1:
 		return agent.ModelResponse{
 			Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-				ID: "delegate-intern-1", Name: "builtin_delegate",
+				ID: "delegate-intern-1", Name: "delegate",
 				Arguments: json.RawMessage(`{"objective":"check and summarize the supplied scoped material","assignee":"intern","access":"read_only"}`),
 			}}}, FinishReason: "tool_calls", Usage: usage,
 		}, nil
@@ -213,7 +213,7 @@ func (m *nativeDelegationIntegrationModel) Complete(_ context.Context, request a
 		}, nil
 	case 3:
 		last := request.Messages[len(request.Messages)-1]
-		if last.Role != "system" || !strings.Contains(last.Content, `type="subagent.terminal"`) || !strings.Contains(last.Content, `role_id="intern"`) || !strings.Contains(last.Content, `status="completed"`) {
+		if last.Role != "tool" || last.ToolCallID != "delegate-intern-1" || !strings.Contains(last.Content, `"kind":"subagent_result"`) || !strings.Contains(last.Content, `"role_id":"intern"`) || !strings.Contains(last.Content, `"success":true`) {
 			return agent.ModelResponse{}, fmt.Errorf("terminal Intern result missing: %+v", last)
 		}
 		if !hasFinalDelegationObservation(request.Messages, "delegate-intern-1", "intern") {
@@ -238,7 +238,7 @@ func (m *codexDelegationIntegrationModel) Complete(_ context.Context, request ag
 	case 1:
 		return agent.ModelResponse{
 			Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-				ID: "delegate-codex-1", Name: "builtin_delegate",
+				ID: "delegate-codex-1", Name: "delegate",
 				Arguments: json.RawMessage(`{"objective":"inspect the workspace and return evidence","assignee":"engineering_team","access":"read_only"}`),
 			}}}, FinishReason: "tool_calls", Usage: usage,
 		}, nil
@@ -259,7 +259,7 @@ func (m *codexDelegationIntegrationModel) Complete(_ context.Context, request ag
 			return agent.ModelResponse{}, fmt.Errorf("primary Eri tools were not restored after engineering-team completion")
 		}
 		last := request.Messages[len(request.Messages)-1]
-		if last.Role != "system" || !strings.Contains(last.Content, `type="subagent.terminal"`) || !strings.Contains(last.Content, `role_id="engineering_team"`) || !strings.Contains(last.Content, `status="completed"`) {
+		if last.Role != "tool" || last.ToolCallID != "delegate-codex-1" || !strings.Contains(last.Content, `"kind":"subagent_result"`) || !strings.Contains(last.Content, `"role_id":"engineering_team"`) || !strings.Contains(last.Content, `"success":true`) {
 			return agent.ModelResponse{}, fmt.Errorf("terminal engineering-team result missing: %+v", last)
 		}
 		if !hasFinalDelegationObservation(request.Messages, "delegate-codex-1", "engineering_team") {
@@ -387,9 +387,12 @@ type memoryBehaviorModel struct {
 
 type reminderBehaviorModel struct {
 	integrationModelCapabilities
-	mu    sync.Mutex
-	calls int
-	at    time.Time
+	mu           sync.Mutex
+	calls        int
+	at           time.Time
+	finalStarted chan struct{}
+	releaseFinal chan struct{}
+	finalOnce    sync.Once
 }
 
 type proactiveConsentModel struct{ integrationModelCapabilities }
@@ -414,7 +417,7 @@ func (proactiveConsentModel) Complete(_ context.Context, request agent.ModelRequ
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: "The daily AI brief is now active for 09:00 Asia/Shanghai."}, FinishReason: "stop", Usage: usage}, nil
 	}
 	return agent.ModelResponse{Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-		ID: "create-ai-brief", Name: "builtin_commitments", Arguments: json.RawMessage(`{"operation":"create","message":"Track material AI developments, deduplicate events, and deliver only high-value changes.","importance":"normal","delivery_route":"recent_channel","schedule":{"type":"daily","daily_time":"09:00","timezone":"Asia/Shanghai"}}`),
+		ID: "create-ai-brief", Name: "schedule", Arguments: json.RawMessage(`{"operation":"create","task":"Track material AI developments, deduplicate events, and deliver only high-value changes.","importance":"normal","delivery_route":"recent_channel","schedule":{"type":"daily","daily_time":"09:00","timezone":"Asia/Shanghai"}}`),
 	}}}, FinishReason: "tool_calls", Usage: usage}, nil
 }
 
@@ -452,7 +455,7 @@ func (feedbackBehaviorModel) Complete(_ context.Context, request agent.ModelRequ
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: "You're right—the confirmed departure is Friday. I recorded the correction against my previous answer."}, FinishReason: "stop", Usage: usage}, nil
 	}
 	return agent.ModelResponse{Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-		ID: "record-correction", Name: "builtin_feedback", Arguments: json.RawMessage(`{"kind":"correction","statement":"The prior Thursday departure was wrong; the confirmed departure is Friday."}`),
+		ID: "record-correction", Name: "feedback", Arguments: json.RawMessage(`{"kind":"correction","statement":"The prior Thursday departure was wrong; the confirmed departure is Friday."}`),
 	}}}, FinishReason: "tool_calls", Usage: usage}, nil
 }
 
@@ -525,7 +528,7 @@ func (referenceEmailModel) Complete(_ context.Context, request agent.ModelReques
 			return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: "Email capability is installed and healthy."}, FinishReason: "stop", Usage: usage}, nil
 		}
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-			ID: "install-email", Name: "builtin_plugins", Arguments: json.RawMessage(`{"operation":"install","manifest_path":"email-v1.json"}`),
+			ID: "install-email", Name: "plugins", Arguments: json.RawMessage(`{"operation":"install","manifest_path":"email-v1.json"}`),
 		}}}, FinishReason: "tool_calls", Usage: usage}, nil
 	case strings.Contains(latestUser, "send approved email"):
 		if last.Role == "tool" && last.ToolCallID == "send-email" {
@@ -565,7 +568,7 @@ func (referenceCalendarModel) Complete(_ context.Context, request agent.ModelReq
 			return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: "Calendar access is installed and healthy."}, FinishReason: "stop", Usage: usage}, nil
 		}
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-			ID: "install-calendar-v1", Name: "builtin_plugins", Arguments: json.RawMessage(`{"operation":"install","manifest_path":"calendar-v1.json"}`),
+			ID: "install-calendar-v1", Name: "plugins", Arguments: json.RawMessage(`{"operation":"install","manifest_path":"calendar-v1.json"}`),
 		}}}, FinishReason: "tool_calls", Usage: usage}, nil
 	case strings.Contains(latestUser, "find calendar windows"):
 		if last.Role == "tool" && last.ToolCallID == "calendar-search" {
@@ -589,7 +592,7 @@ func (referenceCalendarModel) Complete(_ context.Context, request agent.ModelReq
 			return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: "Calendar was upgraded to version 2 after the expanded permission was approved."}, FinishReason: "stop", Usage: usage}, nil
 		}
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-			ID: "upgrade-calendar-v2", Name: "builtin_plugins", Arguments: json.RawMessage(`{"operation":"install","manifest_path":"calendar-v2.json"}`),
+			ID: "upgrade-calendar-v2", Name: "plugins", Arguments: json.RawMessage(`{"operation":"install","manifest_path":"calendar-v2.json"}`),
 		}}}, FinishReason: "tool_calls", Usage: usage}, nil
 	default:
 		return agent.ModelResponse{}, fmt.Errorf("unexpected calendar scenario %q", latestUser)
@@ -617,7 +620,7 @@ func (userDataBehaviorModel) Complete(_ context.Context, request agent.ModelRequ
 			return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: "Your complete Eri data export is attached."}, FinishReason: "stop", Usage: usage}, nil
 		}
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-			ID: "export-all-data", Name: "builtin_user_data", Arguments: json.RawMessage(`{"operation":"export"}`),
+			ID: "export-all-data", Name: "user_data", Arguments: json.RawMessage(`{"operation":"export"}`),
 		}}}, FinishReason: "tool_calls", Usage: usage}, nil
 	case strings.Contains(latestUser, "delete all my data"):
 		if last.Role == "tool" && last.ToolCallID == "delete-all-data" {
@@ -627,7 +630,7 @@ func (userDataBehaviorModel) Complete(_ context.Context, request agent.ModelRequ
 			return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: "Deletion is confirmed. After this message is accepted, Eri will permanently erase all local user content and derived data."}, FinishReason: "stop", Usage: usage}, nil
 		}
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-			ID: "delete-all-data", Name: "builtin_user_data", Arguments: json.RawMessage(`{"operation":"delete_all"}`),
+			ID: "delete-all-data", Name: "user_data", Arguments: json.RawMessage(`{"operation":"delete_all"}`),
 		}}}, FinishReason: "tool_calls", Usage: usage}, nil
 	case strings.Contains(latestUser, "fresh clean start"):
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: "Fresh state is ready."}, FinishReason: "stop", Usage: usage}, nil
@@ -662,7 +665,7 @@ func (m *cancelBehaviorModel) Complete(_ context.Context, request agent.ModelReq
 	}
 	if lastTool == nil {
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-			ID: "list-tasks", Name: "builtin_tasks", Arguments: json.RawMessage(`{"operation":"list","limit":20}`),
+			ID: "list-tasks", Name: "tasks", Arguments: json.RawMessage(`{"operation":"list","limit":20}`),
 		}}}, FinishReason: "tool_calls", Usage: usage}, nil
 	}
 	if lastTool.ToolCallID == "list-tasks" {
@@ -690,7 +693,7 @@ func (m *cancelBehaviorModel) Complete(_ context.Context, request agent.ModelReq
 		}
 		arguments, _ := json.Marshal(map[string]string{"operation": "cancel", "task_id": targetID})
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-			ID: "cancel-task", Name: "builtin_tasks", Arguments: arguments,
+			ID: "cancel-task", Name: "tasks", Arguments: arguments,
 		}}}, FinishReason: "tool_calls", Usage: usage}, nil
 	}
 	if lastTool.ToolCallID == "cancel-task" && strings.Contains(lastTool.Content, `"success":true`) {
@@ -717,21 +720,22 @@ func (n *recordingNotifier) snapshot() []string {
 	return append([]string(nil), n.calls...)
 }
 
-func (m *reminderBehaviorModel) Complete(_ context.Context, request agent.ModelRequest) (agent.ModelResponse, error) {
+func (m *reminderBehaviorModel) Complete(ctx context.Context, request agent.ModelRequest) (agent.ModelResponse, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.calls++
-	switch m.calls {
+	call := m.calls
+	m.mu.Unlock()
+	switch call {
 	case 1:
 		found := false
 		for _, definition := range request.Tools {
-			found = found || definition.Name == "builtin_commitments"
+			found = found || definition.Name == "schedule"
 		}
 		if !found {
-			return agent.ModelResponse{}, fmt.Errorf("commitment descriptor missing")
+			return agent.ModelResponse{}, fmt.Errorf("schedule descriptor missing")
 		}
 		arguments, err := json.Marshal(map[string]any{
-			"operation": "create", "message": "Check travel documents", "importance": "important",
+			"operation": "create", "task": "Remind the user to check their travel documents", "importance": "normal",
 			"schedule": map[string]any{"type": "once", "after_seconds": 1},
 		})
 		if err != nil {
@@ -739,67 +743,52 @@ func (m *reminderBehaviorModel) Complete(_ context.Context, request agent.ModelR
 		}
 		return agent.ModelResponse{
 			Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-				ID: "commitment-call", Name: "builtin_commitments", Arguments: arguments,
+				ID: "commitment-call", Name: "schedule", Arguments: arguments,
 			}}}, FinishReason: "tool_calls", Usage: agent.Usage{Provider: "fake", Model: "reminder", ModelCalls: 1},
 		}, nil
 	case 2:
+		if m.finalStarted != nil {
+			m.finalOnce.Do(func() { close(m.finalStarted) })
+		}
+		if m.releaseFinal != nil {
+			select {
+			case <-m.releaseFinal:
+			case <-ctx.Done():
+				return agent.ModelResponse{}, ctx.Err()
+			}
+		}
 		last := request.Messages[len(request.Messages)-1]
 		if last.Role != "tool" || last.ToolCallID != "commitment-call" || !strings.Contains(last.Content, `"success":true`) {
 			return agent.ModelResponse{}, fmt.Errorf("commitment result missing: %+v", last)
 		}
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: "I will remind you to check your travel documents on time."}, FinishReason: "stop", Usage: agent.Usage{Provider: "fake", Model: "reminder", ModelCalls: 1}}, nil
 	case 3:
-		foundTrigger := false
-		foundNotification := false
-		for _, message := range request.Messages {
-			foundTrigger = foundTrigger || message.Role == "system" && strings.Contains(message.Content, "A durable commitment is due") && strings.Contains(message.Content, "Check travel documents")
-			for _, removed := range []string{"<current_task>", "<task_objective>", "<current_step>", `"trigger_event":"commitment.due"`} {
-				if strings.Contains(message.Content, removed) {
-					return agent.ModelResponse{}, fmt.Errorf("fulfillment contains removed prompt frame %q: %+v", removed, request.Messages)
-				}
-			}
-			if strings.Contains(message.Content, "Remind me later to check my travel documents") ||
-				strings.Contains(message.Content, "I will remind you to check your travel documents on time") {
-				return agent.ModelResponse{}, fmt.Errorf("fulfillment replayed registration conversation: %+v", request.Messages)
-			}
-		}
 		for _, definition := range request.Tools {
-			if definition.Name == "builtin_commitments" {
-				return agent.ModelResponse{}, fmt.Errorf("fulfillment exposed source scheduler capability")
+			switch definition.Name {
+			case "schedule", "tasks", "memory", "feedback", "user_data", "notification":
+				return agent.ModelResponse{}, fmt.Errorf("ordinary reminder fulfillment exposed control-plane tool %q", definition.Name)
 			}
-			foundNotification = foundNotification || definition.Name == "builtin_notification"
 		}
-		if !foundTrigger {
-			return agent.ModelResponse{}, fmt.Errorf("durable trigger context missing: %+v", request.Messages)
-		}
-		if !foundNotification {
-			return agent.ModelResponse{}, fmt.Errorf("important reminder notification capability missing")
-		}
-		// Simulate a provider replaying the registration action despite the
-		// phase-scoped Tool surface. Runtime must reject it without an Effect.
-		return agent.ModelResponse{
-			Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-				ID: "forbidden-commitment-call", Name: "builtin_commitments", Arguments: json.RawMessage(`{"operation":"create","message":"duplicate","schedule":{"type":"once","after_seconds":60}}`),
-			}}}, FinishReason: "tool_calls", Usage: agent.Usage{Provider: "fake", Model: "reminder", ModelCalls: 1},
-		}, nil
-	case 4:
 		last := request.Messages[len(request.Messages)-1]
-		if last.Role != "tool" || last.ToolCallID != "forbidden-commitment-call" || !strings.Contains(last.Content, "is not available") {
-			return agent.ModelResponse{}, fmt.Errorf("phase capability rejection missing: %+v", last)
+		if last.Role != "user" || !strings.Contains(last.Content, "<system_reminder>") ||
+			!strings.Contains(last.Content, "Remind the user to check their travel documents") {
+			return agent.ModelResponse{}, fmt.Errorf("Runtime reminder turn missing: %+v", last)
 		}
-		return agent.ModelResponse{
-			Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-				ID: "notification-call", Name: "builtin_notification", Arguments: json.RawMessage(`{"title":"Eri reminder","body":"It is time to check your travel documents"}`),
-			}}}, FinishReason: "tool_calls", Usage: agent.Usage{Provider: "fake", Model: "reminder", ModelCalls: 1},
-		}, nil
-	case 5:
-		last := request.Messages[len(request.Messages)-1]
-		if last.Role != "tool" || last.ToolCallID != "notification-call" || !strings.Contains(last.Content, `"success":true`) {
-			return agent.ModelResponse{}, fmt.Errorf("notification result missing: %+v", last)
+		foundOriginal, foundCall, foundResult, foundConfirmation := false, false, false, false
+		for _, message := range request.Messages[:len(request.Messages)-1] {
+			foundOriginal = foundOriginal || message.Role == "user" && strings.Contains(message.Content, "Remind me later to check my travel documents")
+			foundConfirmation = foundConfirmation || message.Role == "assistant" && message.Content == "I will remind you to check your travel documents on time."
+			if message.Role == "assistant" && len(message.ToolCalls) == 1 && message.ToolCalls[0].Name == "schedule" && message.ToolCalls[0].ID == "commitment-call" {
+				foundCall = true
+			}
+			foundResult = foundResult || message.Role == "tool" && message.ToolCallID == "commitment-call"
+		}
+		if !foundOriginal || !foundCall || !foundResult || !foundConfirmation {
+			return agent.ModelResponse{}, fmt.Errorf("fulfillment lost prior causal transcript: %+v", request.Messages)
 		}
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: "It is time to check your travel documents."}, FinishReason: "stop", Usage: agent.Usage{Provider: "fake", Model: "reminder", ModelCalls: 1}}, nil
 	default:
-		return agent.ModelResponse{}, fmt.Errorf("unexpected reminder model call %d", m.calls)
+		return agent.ModelResponse{}, fmt.Errorf("unexpected reminder model call %d", call)
 	}
 }
 
@@ -811,9 +800,9 @@ func (m *memoryBehaviorModel) Complete(_ context.Context, request agent.ModelReq
 	case 1:
 		return agent.ModelResponse{
 			Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-				ID: "remember-call", Name: "builtin_memory", Arguments: json.RawMessage(`{
-					"operation":"record","statement":"The user prefers hotel rooms with a window","kind":"preference","scope":"travel",
-					"relation":"supports","explicit_user_memory":true
+				ID: "remember-call", Name: "memory", Arguments: json.RawMessage(`{
+					"operation":"record","statement":"I prefer hotel rooms with a window","kind":"preference","scope":"travel",
+					"explicit_user_memory":true
 				}`),
 			}}}, FinishReason: "tool_calls", Usage: agent.Usage{Provider: "fake", Model: "memory", ModelCalls: 1},
 		}, nil
@@ -823,21 +812,21 @@ func (m *memoryBehaviorModel) Complete(_ context.Context, request agent.ModelReq
 		}
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: "I will remember that."}, FinishReason: "stop", Usage: agent.Usage{Provider: "fake", Model: "memory", ModelCalls: 1}}, nil
 	case 3:
-		if strings.Contains(request.System, "The user prefers hotel rooms with a window") || strings.Contains(request.System, "memory_id=") {
+		if strings.Contains(request.System, "I prefer hotel rooms with a window") || strings.Contains(request.System, "memory_id=") {
 			return agent.ModelResponse{}, fmt.Errorf("governed memory invalidated the stable System prefix: %s", request.System)
 		}
 		dynamicContext := ""
 		for _, message := range request.Messages {
-			if message.Role == "system" && strings.Contains(message.Content, "<relevant_memory_context>") {
+			if message.Role == "system" && strings.Contains(message.Content, "<relevant_memory>") {
 				dynamicContext += message.Content
 			}
 		}
-		if !strings.Contains(dynamicContext, "The user prefers hotel rooms with a window") || !strings.Contains(dynamicContext, "memory_id=") {
+		if !strings.Contains(dynamicContext, "I prefer hotel rooms with a window") || strings.Contains(dynamicContext, "claim ") || strings.Contains(dynamicContext, "memory_id") {
 			return agent.ModelResponse{}, fmt.Errorf("governed memory was not assembled in the dynamic suffix: %s", dynamicContext)
 		}
 		return agent.ModelResponse{
 			Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-				ID: "apply-memory-call", Name: "builtin_files", Arguments: json.RawMessage(`{"operation":"create","path":"hotel-choice.txt","content":"window"}`),
+				ID: "apply-memory-call", Name: "files", Arguments: json.RawMessage(`{"operation":"create","path":"hotel-choice.txt","content":"window"}`),
 			}}}, FinishReason: "tool_calls", Usage: agent.Usage{Provider: "fake", Model: "memory", ModelCalls: 1},
 		}, nil
 	case 4:
@@ -847,11 +836,11 @@ func (m *memoryBehaviorModel) Complete(_ context.Context, request agent.ModelReq
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: "I prepared the options using your window preference."}, FinishReason: "stop", Usage: agent.Usage{Provider: "fake", Model: "memory", ModelCalls: 1}}, nil
 	case 5:
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-			ID: "export-memory-call", Name: "builtin_memory", Arguments: json.RawMessage(`{"operation":"export"}`),
+			ID: "export-memory-call", Name: "memory", Arguments: json.RawMessage(`{"operation":"export"}`),
 		}}}, FinishReason: "tool_calls", Usage: agent.Usage{Provider: "fake", Model: "memory", ModelCalls: 1}}, nil
 	case 6:
 		last := request.Messages[len(request.Messages)-1]
-		if last.Role != "tool" || last.ToolCallID != "export-memory-call" || !strings.Contains(last.Content, `"attachments"`) || strings.Contains(last.Content, "The user prefers hotel rooms with a window") {
+		if last.Role != "tool" || last.ToolCallID != "export-memory-call" || !strings.Contains(last.Content, `"attachments"`) || strings.Contains(last.Content, "I prefer hotel rooms with a window") {
 			return agent.ModelResponse{}, fmt.Errorf("memory export was not passed as attachment metadata: %+v", last)
 		}
 		return agent.ModelResponse{Message: agent.Message{Role: "assistant", Content: "I exported the memory data as a JSON attachment."}, FinishReason: "stop", Usage: agent.Usage{Provider: "fake", Model: "memory", ModelCalls: 1}}, nil
@@ -870,7 +859,7 @@ func (m *approvalIntegrationModel) Complete(_ context.Context, request agent.Mod
 		})
 		return agent.ModelResponse{
 			Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-				ID: "approval-call", Name: "builtin_files", Arguments: arguments,
+				ID: "approval-call", Name: "files", Arguments: arguments,
 			}}},
 			FinishReason: "tool_calls",
 			Usage:        agent.Usage{Provider: "fake", Model: "approval", ModelCalls: 1},
@@ -893,14 +882,14 @@ func (d *toolIntegrationModel) Complete(_ context.Context, request agent.ModelRe
 	if d.calls == 1 {
 		foundFiles := false
 		for _, definition := range request.Tools {
-			foundFiles = foundFiles || definition.Name == "builtin_files"
+			foundFiles = foundFiles || definition.Name == "files"
 		}
 		if !foundFiles {
 			return agent.ModelResponse{}, fmt.Errorf("file descriptor missing from request: %+v", request.Tools)
 		}
 		return agent.ModelResponse{
 			Message: agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
-				ID: "call-1", Name: "builtin_files", Arguments: json.RawMessage(`{"operation":"read","path":"brief.txt"}`),
+				ID: "call-1", Name: "files", Arguments: json.RawMessage(`{"operation":"read","path":"brief.txt"}`),
 			}}},
 			FinishReason: "tool_calls",
 			Usage:        agent.Usage{Provider: "fake", Model: "integration", InputTokens: 10, OutputTokens: 6, ModelCalls: 1},
@@ -1386,7 +1375,7 @@ func TestDaemonFirstConnectionIntroducesEriExactlyOnceThroughDelivery(t *testing
 		time.Sleep(10 * time.Millisecond)
 	}
 	if status.Status != "completed" {
-		t.Fatalf("introduction task status = %q", status.Status)
+		t.Fatalf("introduction task status = %+v", status)
 	}
 
 	var second channel.ConnectResult
@@ -1979,7 +1968,7 @@ func TestDaemonMemoryChangesRealToolParameters(t *testing.T) {
 	}
 	exported, err := io.ReadAll(download.Body)
 	download.Body.Close()
-	if err != nil || !json.Valid(exported) || !bytes.Contains(exported, []byte("The user prefers hotel rooms with a window")) {
+	if err != nil || !json.Valid(exported) || !bytes.Contains(exported, []byte("I prefer hotel rooms with a window")) {
 		t.Fatalf("memory export body = %q err=%v", exported, err)
 	}
 	cancel()
@@ -2067,7 +2056,7 @@ func TestDaemonCommitmentSurvivesRestartAndDeliversProactiveReminder(t *testing.
 	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		integrationJSON(t, client, http.MethodGet, "/api/v1/messages?after=0&limit=10", nil, &timeline)
-		if len(timeline.Messages) == 3 && len(notifier.snapshot()) == 1 {
+		if len(timeline.Messages) == 3 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -2075,9 +2064,14 @@ func TestDaemonCommitmentSurvivesRestartAndDeliversProactiveReminder(t *testing.
 	if len(timeline.Messages) != 3 || timeline.Messages[2].Content != "It is time to check your travel documents." {
 		t.Fatalf("proactive reminder timeline = %+v", timeline.Messages)
 	}
-	notifications := notifier.snapshot()
-	if len(notifications) != 1 || notifications[0] != "Eri reminder\nIt is time to check your travel documents" {
-		t.Fatalf("notifications = %#v", notifications)
+	if notifications := notifier.snapshot(); len(notifications) != 0 {
+		t.Fatalf("ordinary reminder sent a redundant local notification: %#v", notifications)
+	}
+	model.mu.Lock()
+	modelCalls := model.calls
+	model.mu.Unlock()
+	if modelCalls != 3 {
+		t.Fatalf("reminder Agent model calls = %d, want registration tool call + confirmation + one due turn", modelCalls)
 	}
 	commitments, err := second.store.ListCommitments(context.Background(), 10)
 	if err != nil {
@@ -2087,6 +2081,133 @@ func TestDaemonCommitmentSurvivesRestartAndDeliversProactiveReminder(t *testing.
 		t.Fatalf("event delivery replayed the historical scheduling request: %+v", commitments)
 	}
 	assertDataRootDoesNotContain(t, dataRoot, []byte("Check travel documents"))
+}
+
+func TestDaemonDefersDueCommitmentUntilCreatingDeliveryAndKeepsScheduleTranscript(t *testing.T) {
+	root := t.TempDir()
+	socketFile, err := os.CreateTemp("", "eri-reminder-source-delivery-*.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	socketPath := socketFile.Name()
+	if err := socketFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(socketPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+	finalStarted := make(chan struct{})
+	releaseFinal := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(releaseFinal)
+		}
+	}()
+	model := &reminderBehaviorModel{finalStarted: finalStarted, releaseFinal: releaseFinal}
+	cfg := config.Config{
+		DataRoot: root, DatabasePath: filepath.Join(root, "metadata", "eri.db"), SocketPath: socketPath,
+		ConversationAddr: "127.0.0.1:0", ObservatoryAddr: "127.0.0.1:0",
+		Model: "fake", ModelTimeout: 5 * time.Second, PollInterval: 5 * time.Millisecond,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	d, err := New(ctx, cfg, Dependencies{
+		MasterKey: bytes.Repeat([]byte{0x68}, 32), Model: model, Notifier: &recordingNotifier{}, Judge: testPassJudge{},
+	})
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx) }()
+	defer func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("daemon stopped with error: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("daemon did not stop")
+		}
+		d.Close()
+	}()
+	waitForSocket(t, socketPath)
+	client := integrationUnixClient(socketPath)
+	var sent channel.SendResult
+	integrationJSON(t, client, http.MethodPost, "/api/v1/messages", map[string]string{
+		"text": "Remind me later to check my travel documents",
+	}, &sent)
+	select {
+	case <-finalStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("creation Run did not reach its final model turn")
+	}
+
+	var commitment scheduler.Commitment
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		commitments, err := d.store.ListCommitments(ctx, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(commitments) == 1 {
+			commitment = commitments[0]
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if commitment.ID == "" || commitment.SourceTaskID != sent.TaskID {
+		t.Fatalf("creating Task lineage missing from commitment: %+v", commitment)
+	}
+	if delay := time.Until(commitment.NextRunAt.Add(100 * time.Millisecond)); delay > 0 {
+		time.Sleep(delay)
+	}
+	commitments, err := d.store.ListCommitments(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commitments) != 1 || commitments[0].Status != "active" || !commitments[0].LastRunAt.IsZero() {
+		t.Fatalf("due commitment fired before creating delivery: %+v", commitments)
+	}
+	var creatingTask channel.TaskStatus
+	integrationJSON(t, client, http.MethodGet, "/api/v1/tasks/"+sent.TaskID, nil, &creatingTask)
+	if creatingTask.Status == "completed" || creatingTask.Status == "failed" {
+		t.Fatalf("creating Task unexpectedly reached terminal delivery: %+v", creatingTask)
+	}
+
+	close(releaseFinal)
+	released = true
+	var timeline struct {
+		Messages []channel.Message `json:"messages"`
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		integrationJSON(t, client, http.MethodGet, "/api/v1/messages?after=0&limit=10", nil, &timeline)
+		if len(timeline.Messages) == 3 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(timeline.Messages) != 3 || timeline.Messages[1].Content != "I will remind you to check your travel documents on time." ||
+		timeline.Messages[2].Content != "It is time to check your travel documents." {
+		t.Fatalf("deferred reminder timeline = %+v", timeline.Messages)
+	}
+	commitments, err = d.store.ListCommitments(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commitments) != 1 || commitments[0].Status != "completed" || commitments[0].LastRunAt.IsZero() ||
+		!commitments[0].NextRunAt.IsZero() {
+		t.Fatalf("overdue commitment did not fire immediately after delivery: %+v", commitments)
+	}
+	model.mu.Lock()
+	modelCalls := model.calls
+	model.mu.Unlock()
+	if modelCalls != 3 {
+		t.Fatalf("model calls = %d, want schedule call, final confirmation, and fulfillment", modelCalls)
+	}
 }
 
 func TestDaemonProposesRecurringWorkBeforeCreatingItAfterConsent(t *testing.T) {

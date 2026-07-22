@@ -50,10 +50,16 @@ type TaskContext struct {
 	InputSequence        int64
 	ConversationSequence int64
 	Messages             []ContextRecord
-	CheckpointRef        content.Ref
-	CheckpointPhase      string
-	CurrentTask          execution.TaskCapsule
-	ObjectiveRef         content.Ref
+	// PriorTranscriptRef points to the encrypted terminal provider transcript
+	// of the latest delivered assistant turn before this Task's source. Context
+	// Assembly reuses its native Tool frames, then appends authoritative
+	// Conversation records after PriorTranscriptSequence.
+	PriorTranscriptRef      content.Ref
+	PriorTranscriptSequence int64
+	CheckpointRef           content.Ref
+	CheckpointPhase         string
+	CurrentTask             execution.TaskCapsule
+	ObjectiveRef            content.Ref
 }
 
 func (t TaskContext) ExecutionKey() string {
@@ -74,22 +80,23 @@ type ContextCheckpoint struct {
 }
 
 type Commit struct {
-	TaskID          string
-	RunID           string
-	ArtifactID      string
-	EvalID          string
-	DeliveryID      string
-	ArtifactKind    string
-	ArtifactRef     content.Ref
-	TraceRef        content.Ref
-	Usage           Usage
-	EvalResult      eval.Result
-	EvalFindings    []string
-	EvalFindingsRef content.Ref
-	EvalTier        string
-	EvalEvaluator   string
-	TerminalStatus  string
-	FailureCode     string
+	TaskID            string
+	RunID             string
+	ArtifactID        string
+	EvalID            string
+	DeliveryID        string
+	ArtifactKind      string
+	ArtifactRef       content.Ref
+	TraceRef          content.Ref
+	Usage             Usage
+	EvalResult        eval.Result
+	EvalFindings      []string
+	EvalFindingsRef   content.Ref
+	EvalTier          string
+	EvalEvaluator     string
+	TerminalStatus    string
+	FailureCode       string
+	AppliedMemoryUses []MemoryUse
 	// BasisInputSequence is the newest user input included when this result was
 	// produced. BasisConversationSequence is the newest authoritative message
 	// from another Task that was reconciled. Repository commits reject results
@@ -97,6 +104,11 @@ type Commit struct {
 	BasisInputSequence        int64
 	BasisConversationSequence int64
 	Attachments               []ArtifactAttachment
+}
+
+type MemoryUse struct {
+	RetrievalID string
+	MemoryIDs   []string
 }
 
 type ProgressCommit struct {
@@ -333,27 +345,44 @@ type evaluationTrace struct {
 }
 
 type loopState struct {
-	Trace                runTrace                  `json:"trace"`
-	Usage                Usage                     `json:"usage"`
-	ConfirmedEffects     int                       `json:"confirmed_effects"`
-	TurnsUsed            int                       `json:"turns_used"`
-	EvalAttempts         int                       `json:"eval_attempts"`
-	SkillIDs             []string                  `json:"skill_ids"`
-	TaskText             string                    `json:"task_text"`
-	JudgeContext         string                    `json:"judge_context,omitempty"`
-	InputSequence        int64                     `json:"input_sequence"`
-	ConversationSequence int64                     `json:"conversation_sequence"`
-	EvalFindings         []string                  `json:"eval_findings,omitempty"`
-	Attachments          []ArtifactAttachment      `json:"attachments,omitempty"`
-	ContextManifest      execution.ContextManifest `json:"context_manifest"`
-	Capabilities         ModelCapabilities         `json:"capabilities"`
-	ProgressDigest       string                    `json:"progress_digest,omitempty"`
-	StagnantTurns        int                       `json:"stagnant_turns,omitempty"`
-	SynthesisOnly        bool                      `json:"synthesis_only,omitempty"`
-	LastProgressHash     string                    `json:"last_progress_hash,omitempty"`
-	ActiveTurn           *activeTurnTrace          `json:"active_turn,omitempty"`
-	NextTurnTrigger      string                    `json:"next_turn_trigger,omitempty"`
-	PendingDeferred      *pendingDeferred          `json:"pending_deferred,omitempty"`
+	Trace                 runTrace `json:"trace"`
+	Usage                 Usage    `json:"usage"`
+	ConfirmedEffects      int      `json:"confirmed_effects"`
+	TurnsUsed             int      `json:"turns_used"`
+	EvalAttempts          int      `json:"eval_attempts"`
+	SkillIDs              []string `json:"skill_ids"`
+	TaskText              string   `json:"task_text"`
+	SourceInteractionID   string   `json:"source_interaction_id,omitempty"`
+	SourceInteractionText string   `json:"source_interaction_text,omitempty"`
+	SourceInteractionRole string   `json:"source_interaction_role,omitempty"`
+	SourceInteractionKind string   `json:"source_interaction_kind,omitempty"`
+	// ProtectedSourceMessage is the 1-based index of the authoritative user
+	// turn that currently drives this Run. Zero is reserved for legacy
+	// checkpoints and is recovered conservatively before compaction.
+	ProtectedSourceMessage int                       `json:"protected_source_message,omitempty"`
+	JudgeContext           string                    `json:"judge_context,omitempty"`
+	InputSequence          int64                     `json:"input_sequence"`
+	ConversationSequence   int64                     `json:"conversation_sequence"`
+	EvalFindings           []string                  `json:"eval_findings,omitempty"`
+	Attachments            []ArtifactAttachment      `json:"attachments,omitempty"`
+	ContextManifest        execution.ContextManifest `json:"context_manifest"`
+	Capabilities           ModelCapabilities         `json:"capabilities"`
+	ProgressDigest         string                    `json:"progress_digest,omitempty"`
+	StagnantTurns          int                       `json:"stagnant_turns,omitempty"`
+	SynthesisOnly          bool                      `json:"synthesis_only,omitempty"`
+	LastProgressHash       string                    `json:"last_progress_hash,omitempty"`
+	ActiveTurn             *activeTurnTrace          `json:"active_turn,omitempty"`
+	NextTurnTrigger        string                    `json:"next_turn_trigger,omitempty"`
+	PendingDeferred        *pendingDeferred          `json:"pending_deferred,omitempty"`
+	PendingMemoryMutations []pendingMemoryMutation   `json:"pending_memory_mutations,omitempty"`
+}
+
+type pendingMemoryMutation struct {
+	Operation string `json:"operation"`
+	TargetID  string `json:"target_id"`
+	Receipt   string `json:"receipt"`
+	Status    string `json:"status,omitempty"`
+	IntentID  string `json:"intent_id,omitempty"`
 }
 
 type pendingDeferred struct {
@@ -458,11 +487,23 @@ func (s *Service) HandleApprovalResume(ctx context.Context, item runtime.OutboxI
 		continuation.State.Trace.ToolCalls = append(continuation.State.Trace.ToolCalls, toolResultTrace{
 			ModelTurnID: latestModelTurnID(&continuation.State), ToolCallID: call.ID, Status: "user_denied",
 		})
+		if _, _, memoryMutation := proposedMemoryMutation(call.Arguments); memoryMutation {
+			for _, skipped := range continuation.PendingCalls {
+				continuation.Request.Messages = append(continuation.Request.Messages, toolErrorMessage(skipped, "the call was not executed because the governed Memory mutation in this Tool frame was not approved; reconsider it in a new model turn"))
+				continuation.State.Trace.ToolCalls = append(continuation.State.Trace.ToolCalls, toolResultTrace{
+					ModelTurnID: latestModelTurnID(&continuation.State), ToolCallID: skipped.ID,
+					ToolID: continuation.ModelToolIDs[skipped.Name], Status: "skipped_for_memory_mutation",
+				})
+			}
+			continuation.PendingCalls = nil
+		}
 		if err := s.saveToolBatchCheckpoint(ctx, resume.Task, continuation.Request, continuation.PendingCalls, continuation.ModelToolIDs, continuation.State); err != nil {
 			return err
 		}
 	} else {
-		paused, err := s.executeCalls(ctx, resume.Task, &continuation.Request, []ToolCall{call}, continuation.ModelToolIDs, &continuation.State, resume.Grant)
+		calls := append([]ToolCall{call}, continuation.PendingCalls...)
+		continuation.PendingCalls = nil
+		paused, err := s.executeCalls(ctx, resume.Task, &continuation.Request, calls, continuation.ModelToolIDs, &continuation.State, resume.Grant)
 		if errors.Is(err, ErrStaleTaskInput) || errors.Is(err, ErrStaleConversationContext) {
 			return s.continueAfterInterruptedToolFrame(ctx, resume.Task, &continuation, "approval_resume")
 		}
@@ -518,13 +559,6 @@ func (s *Service) HandleSubagentResume(ctx context.Context, item runtime.OutboxI
 	if err := replaceDeferredToolResult(continuation.Request.Messages, pending.ToolCallID, resume.RoleID, resume.Status, resultBody); err != nil {
 		return err
 	}
-	continuation.Request.Messages = append(continuation.Request.Messages, Message{
-		Role: "system",
-		Content: fmt.Sprintf(
-			"<system_event type=\"subagent.terminal\" role_id=\"%s\" status=\"%s\">\nThe delegated work reached a terminal state. Its governed result is now in the original builtin.delegate tool observation. Review that observation and continue the user's task.\n</system_event>",
-			resume.RoleID, resume.Status,
-		),
-	})
 	err = s.continueLoop(ctx, resume.Task, continuation.Request, continuation.ModelToolIDs, continuation.State)
 	s.logger.Info("delegation continuation finished", "component", "agent", "delegation_id", resume.DelegationID, "task_id", resume.Task.TaskID, "status", resume.Status, "duration_ms", time.Since(started).Milliseconds(), "error_code", observability.ErrorCode(err))
 	return err
@@ -543,7 +577,7 @@ func replaceDeferredToolResult(messages []Message, toolCallID, roleID, status st
 			continue
 		}
 		observation := map[string]any{
-			"tool_id": "builtin.delegate",
+			"tool_id": "delegate",
 			"status":  status,
 			"success": status == "completed",
 			"result": map[string]any{
@@ -629,11 +663,21 @@ func (s *Service) ProcessTask(ctx context.Context, taskID string) error {
 	if err != nil {
 		return s.commitFailure(ctx, task, Usage{}, "provider_capabilities_unavailable")
 	}
-	messages, err := s.buildMessages(ctx, task, capabilities)
+	assembled, err := s.buildMessages(ctx, task, capabilities)
 	if err != nil {
 		return s.commitFailure(ctx, task, Usage{}, "context_unavailable")
 	}
-	taskText := latestTaskContentForTask(messages, task.Messages, task.TaskID)
+	if assembled.SourceIndex < 0 || assembled.SourceIndex >= len(assembled.Messages) {
+		return s.commitFailure(ctx, task, Usage{}, "context_source_unavailable")
+	}
+	messages := assembled.Messages
+	taskText := ""
+	if assembled.SourceIndex >= 0 && assembled.SourceIndex < len(messages) {
+		taskText = messages[assembled.SourceIndex].Content
+	}
+	if strings.TrimSpace(taskText) == "" {
+		taskText = latestTaskContentForTask(messages, task.Messages, task.TaskID)
+	}
 	if strings.TrimSpace(taskText) == "" {
 		taskText = latestTaskContent(messages)
 	}
@@ -643,6 +687,10 @@ func (s *Service) ProcessTask(ctx context.Context, taskID string) error {
 			return s.commitFailure(ctx, task, Usage{}, "task_objective_unavailable")
 		}
 		taskText = string(body)
+	}
+	sourceText, err := s.sourceInteractionText(ctx, task.Messages, task.CurrentTask.SourceInteractionID)
+	if err != nil {
+		return s.commitFailure(ctx, task, Usage{}, "context_unavailable")
 	}
 	if err := s.repository.MarkRunDispatched(ctx, task.RunID); err != nil {
 		return err
@@ -655,7 +703,7 @@ func (s *Service) ProcessTask(ctx context.Context, taskID string) error {
 			return s.commitFailure(ctx, task, Usage{}, "skill_catalog_unavailable")
 		}
 	}
-	if s.memory != nil {
+	if s.memory != nil && task.CurrentTask.SourceRole == "user" {
 		bundle, err := s.memory.Recall(ctx, memory.RecallRequest{
 			Query: memoryAttentionCue(taskText, messages), RunID: task.RunID,
 			SourceInteractionID: task.CurrentTask.SourceInteractionID, Limit: 5,
@@ -664,14 +712,20 @@ func (s *Service) ProcessTask(ctx context.Context, taskID string) error {
 			return s.commitFailure(ctx, task, Usage{}, "memory_unavailable")
 		}
 		memoryIDs := make([]string, 0, len(bundle.Entries))
+		memoryClaimIDs := make([]string, 0, len(bundle.Entries))
 		memoryBundle = bundle
 		for _, entry := range bundle.Entries {
 			memoryIDs = append(memoryIDs, entry.MemoryID)
+			memoryClaimIDs = append(memoryClaimIDs, entry.ClaimID)
+			manifestValue.MemoryBindings = append(manifestValue.MemoryBindings, execution.MemoryBinding{
+				RetrievalID: bundle.RetrievalID, MemoryID: entry.MemoryID, ClaimID: entry.ClaimID,
+			})
 		}
 		manifestValue.MemoryChecked = true
 		manifestValue.MemoryRetrievalID = bundle.RetrievalID
 		manifestValue.RetrievedMemoryIDs = append([]string(nil), bundle.RetrievedIDs...)
 		manifestValue.MemoryIDs = memoryIDs
+		manifestValue.MemoryClaimIDs = memoryClaimIDs
 		if s.loop.ExternalModel && len(memoryIDs) > 0 {
 			manifestValue.ExternalMemoryIDs = append([]string(nil), memoryIDs...)
 		}
@@ -700,19 +754,15 @@ func (s *Service) ProcessTask(ctx context.Context, taskID string) error {
 		Messages: append([]Message(nil), messages...), Tools: definitions,
 		MaxOutputTokens: minPositive(s.loop.MaxOutputTokens, capabilities.MaxOutputTokens),
 	}
-	request, compactionUsage, err := s.compactPersistentContext(ctx, task, request, capabilities, &manifestValue)
+	request, compactionUsage, sourceIndex, err := s.compactPersistentContext(ctx, task, request, capabilities, &manifestValue, assembled.SourceIndex, assembled.Carried)
 	if err != nil {
 		s.logger.Warn("persistent context compaction failed", "component", "agent", "task_id", task.TaskID, "run_id", task.RunID, "execution_id", task.ExecutionKey(), "error_code", observability.ErrorCode(err), "error", observability.SafeError(err))
 		return s.commitFailure(ctx, task, compactionUsage, "context_compaction_failed")
 	}
+	protectedSource := sourceIndex
 	if prompts.MemoryContext != nil {
-		request.Messages = insertBeforeSourceInteraction(
-			request.Messages,
-			task.Messages,
-			task.CurrentTask.SourceInteractionID,
-			manifestValue.Compression.SummarizedCount,
-			*prompts.MemoryContext,
-		)
+		request.Messages = insertMessageAt(request.Messages, sourceIndex, *prompts.MemoryContext)
+		protectedSource++
 	}
 	manifestValue.EstimatedInputTokens = estimateModelInputTokens(request)
 	updatedManifest, err := json.Marshal(manifestValue)
@@ -724,7 +774,10 @@ func (s *Service) ProcessTask(ctx context.Context, taskID string) error {
 	}
 	state := loopState{
 		Trace: runTrace{ModelTurns: []modelTurnTrace{}, ToolCalls: []toolResultTrace{}, Evaluations: []evaluationTrace{}}, Usage: compactionUsage,
-		SkillIDs: append([]string(nil), manifestValue.SkillIDs...), TaskText: taskText, JudgeContext: prompts.JudgeContext,
+		SkillIDs: append([]string(nil), manifestValue.SkillIDs...), TaskText: taskText,
+		SourceInteractionID: task.CurrentTask.SourceInteractionID, SourceInteractionText: sourceText,
+		SourceInteractionRole: task.CurrentTask.SourceRole, SourceInteractionKind: task.CurrentTask.SourceKind,
+		ProtectedSourceMessage: protectedSource + 1, JudgeContext: prompts.JudgeContext,
 		InputSequence: task.InputSequence, ConversationSequence: conversationSequence, ContextManifest: manifestValue,
 		Capabilities: capabilities,
 	}
@@ -734,17 +787,29 @@ func (s *Service) ProcessTask(ctx context.Context, taskID string) error {
 }
 
 // descriptorsForTask applies phase authority before Tool schemas enter model
-// context. A due commitment is already registered durable work, so its
-// fulfillment run cannot mutate the scheduler that caused it to exist.
+// context. A due commitment cannot manage Runtime work, reschedule itself,
+// mutate long-term personal state, or treat its trigger as user feedback. It
+// retains ordinary work capabilities because a recurring assignment may still
+// need Web, files, terminal, Skills, Plugins, or delegation. Notification is
+// available only for work explicitly marked important.
 func descriptorsForTask(descriptors []tool.Descriptor, task execution.TaskCapsule) []tool.Descriptor {
+	if task.SourceKind == "internal_trigger" && task.SourceRole == "system" && task.TriggerChannel == "introduction" {
+		return nil
+	}
 	if task.ExecutionPhase != execution.TaskPhaseFulfillment || task.TriggerEvent != execution.TriggerEventCommitmentDue {
 		return descriptors
 	}
 	filtered := make([]tool.Descriptor, 0, len(descriptors))
 	for _, descriptor := range descriptors {
-		if descriptor.ID != "builtin.commitments" {
-			filtered = append(filtered, descriptor)
+		switch descriptor.ID {
+		case "builtin.commitments", "builtin.tasks", "builtin.memory", "builtin.feedback", "builtin.user_data":
+			continue
+		case "builtin.notification":
+			if task.Importance != "important" {
+				continue
+			}
 		}
+		filtered = append(filtered, descriptor)
 	}
 	return filtered
 }
@@ -760,7 +825,7 @@ func (s *Service) resumeAgentCheckpoint(ctx context.Context, task TaskContext, c
 	}
 	restoreConversationWatermark(task, &continuation)
 	s.restoreJudgeContext(task, &continuation)
-	if !sameStringMap(continuation.ModelToolIDs, currentToolIDs) {
+	if !sameToolSurface(continuation.ModelToolIDs, currentToolIDs) {
 		continuation.State.Trace.RuntimeStop = "tool_surface_changed_during_recovery"
 		return s.commitFailure(ctx, task, continuation.State.Usage, "tool_surface_changed_during_recovery", traceWithProviderTranscript(continuation.State.Trace, continuation.Request))
 	}
@@ -862,12 +927,17 @@ func (s *Service) continueAfterInterruptedToolFrame(ctx context.Context, task Ta
 	return s.continueLoop(ctx, task, continuation.Request, continuation.ModelToolIDs, continuation.State)
 }
 
-func sameStringMap(left, right map[string]string) bool {
+func sameToolSurface(left, right map[string]string) bool {
+	// Model-visible aliases are part of the provider transcript protocol. Even
+	// when canonical Tool IDs are unchanged, resuming an in-flight checkpoint
+	// under renamed aliases would mix old definitions and calls with a new
+	// dispatch map. Fail closed so recovery cannot produce an unexecutable
+	// transcript.
 	if len(left) != len(right) {
 		return false
 	}
-	for key, value := range left {
-		if right[key] != value {
+	for alias, id := range left {
+		if right[alias] != id {
 			return false
 		}
 	}
@@ -889,7 +959,7 @@ func (s *Service) saveAgentCheckpoint(ctx context.Context, task TaskContext, pha
 	return s.repository.SaveAgentCheckpoint(ctx, task, phase, ref)
 }
 
-func (s *Service) commitEvaluatedReply(ctx context.Context, task TaskContext, trace any, usage Usage, body, kind, tier string, findings []string, attachments []ArtifactAttachment, basisInputSequence, basisConversationSequence int64) error {
+func (s *Service) commitEvaluatedReply(ctx context.Context, task TaskContext, trace any, usage Usage, body, kind, tier string, findings []string, attachments []ArtifactAttachment, basisInputSequence, basisConversationSequence int64, appliedMemoryUses []MemoryUse) error {
 	result, gateFindings := eval.Routine(body)
 	if result != eval.Pass {
 		return s.commitFailure(ctx, task, usage, "routine_eval_failed")
@@ -936,6 +1006,7 @@ func (s *Service) commitEvaluatedReply(ctx context.Context, task TaskContext, tr
 	commit.TerminalStatus = "completed"
 	commit.BasisInputSequence = basisInputSequence
 	commit.BasisConversationSequence = basisConversationSequence
+	commit.AppliedMemoryUses = append([]MemoryUse(nil), appliedMemoryUses...)
 	commit.Attachments = attachments
 	commit.EvalFindingsRef, err = s.storeEvalFindings(ctx, commit.EvalID, commit.EvalFindings)
 	if err != nil {
@@ -1075,8 +1146,25 @@ func (s *Service) pauseForSubagent(ctx context.Context, task TaskContext, state 
 	if err != nil {
 		return err
 	}
+	// The last assistant message is a user-visible progress artifact, not
+	// provider continuation state. It has already passed Eval and is persisted
+	// separately below. Exclude it from the private continuation so that, when
+	// Runtime replaces the earlier deferred observation, the native
+	// assistant(delegate) -> tool(final result) frame is again the tail that
+	// triggers synthesis. Re-appending the delivered progress would hide that
+	// fresh result behind stale assistant text.
+	continuationRequest := snapshotModelRequest(request)
+	if len(continuationRequest.Messages) == 0 {
+		return fmt.Errorf("delegation progress continuation has no assistant candidate")
+	}
+	progressIndex := len(continuationRequest.Messages) - 1
+	progress := continuationRequest.Messages[progressIndex]
+	if progress.Role != "assistant" || len(progress.ToolCalls) != 0 || strings.TrimSpace(progress.Content) != strings.TrimSpace(body) {
+		return fmt.Errorf("delegation progress continuation does not end with the evaluated progress candidate")
+	}
+	continuationRequest.Messages = continuationRequest.Messages[:progressIndex]
 	continuationBody, err := json.Marshal(pendingContinuation{
-		Request: request, ModelToolIDs: modelToolIDs, State: state,
+		Request: continuationRequest, ModelToolIDs: modelToolIDs, State: state,
 	})
 	if err != nil {
 		return fmt.Errorf("encode delegation continuation: %w", err)

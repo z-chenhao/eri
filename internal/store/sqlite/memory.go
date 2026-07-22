@@ -23,6 +23,14 @@ func (s *Store) CaptureEvidence(ctx context.Context, record memory.CaptureRecord
 		return memory.CaptureOutcome{}, err
 	}
 	defer tx.Rollback()
+	if existing, found, err := loadExistingCapture(ctx, tx, record); err != nil {
+		return memory.CaptureOutcome{}, err
+	} else if found {
+		// An exact Evidence retry is a read-only success. In particular it must
+		// not reactivate lifecycle state, reinforce salience, advance the Belief
+		// version, refresh timestamps, or append duplicate Events.
+		return existing, nil
+	}
 	outcome := memory.CaptureOutcome{}
 	claimID := record.ClaimID
 	var statementRefJSON string
@@ -57,12 +65,14 @@ func (s *Store) CaptureEvidence(ctx context.Context, record memory.CaptureRecord
 		return memory.CaptureOutcome{}, err
 	}
 	memoryID := ""
-	var itemStatus, usagePolicy, kind, scope, updated string
+	var itemStatus, usagePolicy, kind, scope, updated, replacesMemoryID string
 	var salience float64
 	var pinned int
 	err = tx.QueryRowContext(ctx, `
-		SELECT id, kind, scope, salience, status, usage_policy, pinned, updated_at FROM memory_items WHERE claim_id = ?`, claimID).
-		Scan(&memoryID, &kind, &scope, &salience, &itemStatus, &usagePolicy, &pinned, &updated)
+		SELECT id, kind, scope, salience, status, usage_policy, pinned, updated_at,
+			COALESCE(replaces_memory_id, '')
+		FROM memory_items WHERE claim_id = ?`, claimID).
+		Scan(&memoryID, &kind, &scope, &salience, &itemStatus, &usagePolicy, &pinned, &updated, &replacesMemoryID)
 	if errors.Is(err, sql.ErrNoRows) {
 		memoryID, err = identifier.New()
 		if err != nil {
@@ -78,14 +88,36 @@ func (s *Store) CaptureEvidence(ctx context.Context, record memory.CaptureRecord
 		usagePolicy = "allow"
 		kind, scope, salience, updated = record.Kind, record.Scope, 0.5, formatTime(now)
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO memory_items(id, claim_id, kind, scope, salience, status, usage_policy, pinned, created_at, updated_at)
-			VALUES(?, ?, ?, ?, ?, ?, 'allow', ?, ?, ?)`, memoryID, claimID, kind, scope, salience,
+			INSERT INTO memory_items(id, claim_id, replaces_memory_id, kind, scope, salience, status, usage_policy, pinned, created_at, updated_at)
+			VALUES(?, ?, NULL, ?, ?, ?, ?, 'allow', ?, ?, ?)`, memoryID, claimID, kind, scope, salience,
 			itemStatus, pinned, formatTime(now), formatTime(now)); err != nil {
 			return memory.CaptureOutcome{}, err
 		}
 	} else if err != nil {
 		return memory.CaptureOutcome{}, err
-	} else if record.Activate {
+	}
+	replacementLinked := false
+	if record.ReplacesMemoryID != "" {
+		replacementLinked, err = bindMemoryReplacement(ctx, tx, memoryID, replacesMemoryID, record.ReplacesMemoryID, now)
+		if err != nil {
+			return memory.CaptureOutcome{}, err
+		}
+		replacesMemoryID = record.ReplacesMemoryID
+	}
+	// Validate immutable revision lineage before changing lifecycle state. A
+	// later observation of an old revision must never reactivate it after a
+	// successor has already become current.
+	if record.Activate {
+		if itemStatus == "archived" {
+			var successorID string
+			err := tx.QueryRowContext(ctx, `SELECT id FROM memory_items WHERE replaces_memory_id = ?`, memoryID).Scan(&successorID)
+			if err == nil {
+				return memory.CaptureOutcome{}, fmt.Errorf("memory revision was already superseded by %s", successorID)
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return memory.CaptureOutcome{}, err
+			}
+		}
 		itemStatus = "active"
 		if record.Pin {
 			pinned = 1
@@ -174,12 +206,25 @@ func (s *Store) CaptureEvidence(ctx context.Context, record memory.CaptureRecord
 	}, now); err != nil {
 		return memory.CaptureOutcome{}, err
 	}
+	if replacementLinked {
+		if err := appendEvent(ctx, tx, "memory", memoryID, "memory.revision_created", map[string]any{
+			"replaces_memory_id": record.ReplacesMemoryID,
+		}, now); err != nil {
+			return memory.CaptureOutcome{}, err
+		}
+		if err := appendEvent(ctx, tx, "memory", record.ReplacesMemoryID, "memory.replaced", map[string]any{
+			"replaced_by_memory_id": memoryID,
+		}, now); err != nil {
+			return memory.CaptureOutcome{}, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return memory.CaptureOutcome{}, err
 	}
 	updatedAt, _ := parseTime(updated)
 	outcome.Snapshot = memory.Snapshot{
-		MemoryID: memoryID, ClaimID: claimID, Status: assessment.Status, Confidence: assessment.Confidence,
+		MemoryID: memoryID, ClaimID: claimID, ReplacesMemoryID: replacesMemoryID,
+		Status: assessment.Status, Confidence: assessment.Confidence,
 		SupportWeight: assessment.SupportWeight, ContradictWeight: assessment.ContradictWeight,
 		IndependentGroups: assessment.IndependentGroups, Kind: kind, Scope: scope,
 		UsagePolicy: usagePolicy, LifecycleStatus: itemStatus, Salience: salience, Pinned: pinned == 1,
@@ -189,6 +234,123 @@ func (s *Store) CaptureEvidence(ctx context.Context, record memory.CaptureRecord
 		return memory.CaptureOutcome{}, err
 	}
 	return outcome, nil
+}
+
+func loadExistingCapture(ctx context.Context, tx *sql.Tx, record memory.CaptureRecord) (memory.CaptureOutcome, bool, error) {
+	var outcome memory.CaptureOutcome
+	var statementKey, statementRefJSON, beliefStatus, lifecycleStatus, usagePolicy, updatedAt, replacesMemoryID string
+	var confidence, supportWeight, contradictWeight, salience float64
+	var independentGroups, expired, pinned int
+	err := tx.QueryRowContext(ctx, `
+		SELECT c.statement_key, c.statement_ref_json, m.id, m.claim_id,
+			COALESCE(m.replaces_memory_id, ''), b.status, b.confidence,
+			b.support_weight, b.contradict_weight, b.independent_groups, b.expired,
+			m.kind, m.scope, m.usage_policy, m.status, m.salience, m.pinned, m.updated_at
+		FROM memory_evidence e
+		JOIN memory_claims c ON c.id = e.claim_id
+		JOIN memory_items m ON m.claim_id = c.id
+		JOIN memory_beliefs b ON b.claim_id = c.id
+		WHERE e.evidence_key = ?`, record.EvidenceKey).
+		Scan(&statementKey, &statementRefJSON, &outcome.Snapshot.MemoryID, &outcome.Snapshot.ClaimID,
+			&replacesMemoryID, &beliefStatus, &confidence, &supportWeight, &contradictWeight,
+			&independentGroups, &expired, &outcome.Snapshot.Kind, &outcome.Snapshot.Scope,
+			&usagePolicy, &lifecycleStatus, &salience, &pinned, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return memory.CaptureOutcome{}, false, nil
+	}
+	if err != nil {
+		return memory.CaptureOutcome{}, false, err
+	}
+	if statementKey != record.ClaimKey {
+		return memory.CaptureOutcome{}, false, fmt.Errorf("evidence key is bound to a different claim")
+	}
+	if replacesMemoryID != record.ReplacesMemoryID {
+		return memory.CaptureOutcome{}, false, fmt.Errorf("evidence key is bound to a different memory revision")
+	}
+	outcome.Snapshot.ReplacesMemoryID = replacesMemoryID
+	outcome.Snapshot.Status = memory.BeliefStatus(beliefStatus)
+	outcome.Snapshot.Confidence = confidence
+	outcome.Snapshot.SupportWeight = supportWeight
+	outcome.Snapshot.ContradictWeight = contradictWeight
+	outcome.Snapshot.IndependentGroups = independentGroups
+	outcome.Snapshot.Expired = expired == 1
+	outcome.Snapshot.UsagePolicy = usagePolicy
+	outcome.Snapshot.LifecycleStatus = lifecycleStatus
+	outcome.Snapshot.Salience = salience
+	outcome.Snapshot.Pinned = pinned == 1
+	outcome.Snapshot.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return memory.CaptureOutcome{}, false, err
+	}
+	if err := json.Unmarshal([]byte(statementRefJSON), &outcome.Snapshot.StatementRef); err != nil {
+		return memory.CaptureOutcome{}, false, err
+	}
+	return outcome, true, nil
+}
+
+func bindMemoryReplacement(ctx context.Context, tx *sql.Tx, memoryID, currentParentID, replacesMemoryID string, now time.Time) (bool, error) {
+	if memoryID == replacesMemoryID {
+		return false, fmt.Errorf("memory cannot replace itself")
+	}
+	if currentParentID != "" && currentParentID != replacesMemoryID {
+		return false, fmt.Errorf("memory already replaces a different item")
+	}
+	if currentParentID != "" {
+		var successorID string
+		err := tx.QueryRowContext(ctx, `SELECT id FROM memory_items WHERE replaces_memory_id = ?`, memoryID).Scan(&successorID)
+		if err == nil {
+			return false, fmt.Errorf("memory revision was already superseded by %s", successorID)
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return false, err
+		}
+	}
+	var replacedStatus string
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM memory_items WHERE id = ?`, replacesMemoryID).Scan(&replacedStatus); errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("replaced memory not found")
+	} else if err != nil {
+		return false, err
+	}
+	if replacedStatus == "deleted" {
+		return false, fmt.Errorf("deleted memory cannot be replaced")
+	}
+	if currentParentID == "" && replacedStatus == "archived" {
+		return false, fmt.Errorf("archived memory is not the current fact")
+	}
+	var successorID string
+	err := tx.QueryRowContext(ctx, `
+		SELECT id FROM memory_items WHERE replaces_memory_id = ? AND id != ?`, replacesMemoryID, memoryID).Scan(&successorID)
+	if err == nil {
+		return false, fmt.Errorf("memory was already replaced by %s", successorID)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	var cycleCount int
+	if err := tx.QueryRowContext(ctx, `
+		WITH RECURSIVE lineage(id, replaces_memory_id) AS (
+			SELECT id, replaces_memory_id FROM memory_items WHERE id = ?
+			UNION ALL
+			SELECT parent.id, parent.replaces_memory_id
+			FROM memory_items parent JOIN lineage child ON parent.id = child.replaces_memory_id
+			WHERE child.replaces_memory_id IS NOT NULL
+		)
+		SELECT COUNT(*) FROM lineage WHERE id = ?`, replacesMemoryID, memoryID).Scan(&cycleCount); err != nil {
+		return false, err
+	}
+	if cycleCount != 0 {
+		return false, fmt.Errorf("memory replacement would create a cycle")
+	}
+	linked := currentParentID == ""
+	if currentParentID == "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE memory_items SET replaces_memory_id = ? WHERE id = ?`, replacesMemoryID, memoryID); err != nil {
+			return false, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_items SET status = 'archived', updated_at = ? WHERE id = ?`, formatTime(now), replacesMemoryID); err != nil {
+		return false, err
+	}
+	return linked, nil
 }
 
 func assessClaim(ctx context.Context, tx *sql.Tx, claimID string, now time.Time) (memory.Assessment, error) {
@@ -488,12 +650,12 @@ func (s *Store) loadMemoryCandidate(ctx context.Context, memoryID string) (memor
 	var lastAccessed sql.NullString
 	var pinned int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT m.id, m.claim_id, c.statement_ref_json, b.status, b.confidence, b.support_weight,
+		SELECT m.id, m.claim_id, COALESCE(m.replaces_memory_id, ''), c.statement_ref_json, b.status, b.confidence, b.support_weight,
 			b.contradict_weight, b.independent_groups, b.expired, m.kind, m.scope, m.usage_policy,
 			m.status, m.salience, m.access_count, m.last_accessed_at, m.pinned, m.updated_at
 		FROM memory_items m JOIN memory_claims c ON c.id = m.claim_id
 		JOIN memory_beliefs b ON b.claim_id = c.id WHERE m.id = ?`, memoryID).
-		Scan(&candidate.MemoryID, &candidate.ClaimID, &statementRef, &status, &candidate.Confidence,
+		Scan(&candidate.MemoryID, &candidate.ClaimID, &candidate.ReplacesMemoryID, &statementRef, &status, &candidate.Confidence,
 			&candidate.SupportWeight, &candidate.ContradictWeight, &candidate.IndependentGroups, &candidate.Expired,
 			&candidate.Kind, &candidate.Scope, &candidate.UsagePolicy, &lifecycle, &candidate.Salience,
 			&candidate.AccessCount, &lastAccessed, &pinned, &updated)
@@ -584,14 +746,27 @@ func (s *Store) RecordMemoryRetrieval(ctx context.Context, record memory.Retriev
 }
 
 func (s *Store) RecordMemoryUse(ctx context.Context, retrievalID string, memoryIDs []string, now time.Time) error {
-	ids := append([]string(nil), memoryIDs...)
-	sort.Strings(ids)
-	ids = compactStrings(ids)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err := recordMemoryUseTx(ctx, tx, retrievalID, memoryIDs, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func recordMemoryUseTx(ctx context.Context, tx *sql.Tx, retrievalID string, memoryIDs []string, now time.Time) error {
+	ids := append([]string(nil), memoryIDs...)
+	sort.Strings(ids)
+	ids = compactStrings(ids)
+	if len(ids) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(retrievalID) == "" {
+		return fmt.Errorf("memory retrieval id is required for applied Memory")
+	}
 	newlyUsed := make([]string, 0, len(ids))
 	for _, id := range ids {
 		var injected, used int
@@ -685,7 +860,7 @@ func (s *Store) RecordMemoryUse(ctx context.Context, retrievalID string, memoryI
 			}
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (s *Store) PromoteMemory(ctx context.Context, memoryID string, pin bool) error {
@@ -908,6 +1083,7 @@ func (s *Store) PlanDeleteMemory(ctx context.Context, memoryID string) (memory.D
 		return memory.DeletePlan{}, err
 	}
 	refs := append([]content.Ref{candidate.StatementRef}, candidate.EvidenceRefs...)
+	semanticIndexes := 0
 	var semanticRefJSON string
 	if err := s.db.QueryRowContext(ctx, `SELECT vector_ref_json FROM memory_semantic_index WHERE memory_id = ?`, memoryID).Scan(&semanticRefJSON); err == nil {
 		var semanticRef content.Ref
@@ -915,9 +1091,20 @@ func (s *Store) PlanDeleteMemory(ctx context.Context, memoryID string) (memory.D
 			return memory.DeletePlan{}, err
 		}
 		refs = append(refs, semanticRef)
+		semanticIndexes = 1
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return memory.DeletePlan{}, err
 	}
+	toolResults, err := memoryToolResultsForMemory(ctx, s.db, memoryID)
+	if err != nil {
+		return memory.DeletePlan{}, err
+	}
+	for _, result := range toolResults {
+		if result.Ref.ObjectID != "" {
+			refs = append(refs, result.Ref)
+		}
+	}
+	refs = uniqueContentRefs(refs)
 	tasks, err := tasksReferencingMemory(ctx, s.db, memoryID)
 	if err != nil {
 		return memory.DeletePlan{}, err
@@ -929,60 +1116,106 @@ func (s *Store) PlanDeleteMemory(ctx context.Context, memoryID string) (memory.D
 	return memory.DeletePlan{
 		MemoryID: memoryID, ClaimID: candidate.ClaimID, ContentRefs: refs,
 		Affected: map[string]int{
-			"claims": 1, "beliefs": 1, "memory_items": 1, "evidence": len(candidate.EvidenceRefs), "semantic_indexes": len(refs) - len(candidate.EvidenceRefs) - 1,
+			"claims": 1, "beliefs": 1, "memory_items": 1, "evidence": len(candidate.EvidenceRefs), "semantic_indexes": semanticIndexes,
+			"tool_results":         countMemoryToolResultRefs(toolResults),
 			"episodes_invalidated": episodes, "dataset_candidates_invalidated": datasets,
 			"dataset_snapshots_invalidated": snapshots,
 		},
 	}, nil
 }
 
-func (s *Store) CommitDeleteMemory(ctx context.Context, plan memory.DeletePlan) error {
+func (s *Store) CommitDeleteMemory(ctx context.Context, plan memory.DeletePlan) (memory.DeletePlan, error) {
 	now := time.Now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return memory.DeletePlan{}, err
+	}
+	defer tx.Rollback()
+	// Take the SQLite writer reservation before inspecting retrievals. A Recall
+	// that has not recorded its retrieval yet will then fail its FK write after
+	// this deletion; one that already recorded it is visible below. This closes
+	// the Plan-to-Commit window in which a new encrypted Tool result could
+	// otherwise retain the forgotten statement.
+	locked, err := tx.ExecContext(ctx, `UPDATE memory_items SET updated_at = updated_at WHERE id = ? AND claim_id = ?`, plan.MemoryID, plan.ClaimID)
+	if err != nil {
+		return memory.DeletePlan{}, err
+	}
+	if count, err := locked.RowsAffected(); err != nil {
+		return memory.DeletePlan{}, err
+	} else if count != 1 {
+		return memory.DeletePlan{}, fmt.Errorf("memory not found")
+	}
+	toolResults, err := memoryToolResultsForMemory(ctx, tx, plan.MemoryID)
+	if err != nil {
+		return memory.DeletePlan{}, err
+	}
+	for _, result := range toolResults {
+		switch result.Status {
+		case "planned", "authorized", "dispatched", "unknown":
+			return memory.DeletePlan{}, fmt.Errorf("memory read %s is still in progress; retry deletion", result.IntentID)
+		}
+		if result.Ref.ObjectID != "" {
+			plan.ContentRefs = append(plan.ContentRefs, result.Ref)
+		}
+	}
+	plan.ContentRefs = uniqueContentRefs(plan.ContentRefs)
+	if plan.Affected == nil {
+		plan.Affected = make(map[string]int)
+	}
+	plan.Affected["tool_results"] = countMemoryToolResultRefs(toolResults)
 	refsJSON, err := json.Marshal(plan.ContentRefs)
 	if err != nil {
-		return err
+		return memory.DeletePlan{}, err
 	}
 	affectedJSON, err := json.Marshal(plan.Affected)
 	if err != nil {
-		return err
+		return memory.DeletePlan{}, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO memory_delete_jobs(memory_id, claim_id, refs_json, affected_json, status, created_at)
 		VALUES(?, ?, ?, ?, 'pending', ?)`, plan.MemoryID, plan.ClaimID, string(refsJSON), string(affectedJSON), formatTime(now)); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_terms WHERE memory_id = ?`, plan.MemoryID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_associations WHERE left_memory_id = ? OR right_memory_id = ?`, plan.MemoryID, plan.MemoryID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_retrieval_items WHERE memory_id = ?`, plan.MemoryID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_semantic_index WHERE memory_id = ?`, plan.MemoryID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_evidence WHERE claim_id = ?`, plan.ClaimID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_beliefs WHERE claim_id = ?`, plan.ClaimID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_items WHERE id = ? AND claim_id = ?`, plan.MemoryID, plan.ClaimID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_claims WHERE id = ?`, plan.ClaimID); err != nil {
-		return err
+		return memory.DeletePlan{}, err
 	}
 	tasks, err := tasksReferencingMemory(ctx, tx, plan.MemoryID)
 	if err != nil {
-		return err
+		return memory.DeletePlan{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE effect_intents SET result_ref_json = NULL, updated_at = ?
+		WHERE tool_id = 'builtin.memory' AND id IN (
+			SELECT retrieval_id FROM memory_retrieval_items WHERE memory_id = ?
+		)`, formatTime(now), plan.MemoryID); err != nil {
+		return memory.DeletePlan{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_terms WHERE memory_id = ?`, plan.MemoryID); err != nil {
+		return memory.DeletePlan{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_associations WHERE left_memory_id = ? OR right_memory_id = ?`, plan.MemoryID, plan.MemoryID); err != nil {
+		return memory.DeletePlan{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_retrieval_items WHERE memory_id = ?`, plan.MemoryID); err != nil {
+		return memory.DeletePlan{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_semantic_index WHERE memory_id = ?`, plan.MemoryID); err != nil {
+		return memory.DeletePlan{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_evidence WHERE claim_id = ?`, plan.ClaimID); err != nil {
+		return memory.DeletePlan{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_beliefs WHERE claim_id = ?`, plan.ClaimID); err != nil {
+		return memory.DeletePlan{}, err
+	}
+	// Erasing an older revision also erases that lineage edge. Keep its current
+	// successor usable and eligible for a future correction instead of leaving
+	// a dangling replaces_memory_id that can never be validated again.
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_items SET replaces_memory_id = NULL WHERE replaces_memory_id = ?`, plan.MemoryID); err != nil {
+		return memory.DeletePlan{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_items WHERE id = ? AND claim_id = ?`, plan.MemoryID, plan.ClaimID); err != nil {
+		return memory.DeletePlan{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_claims WHERE id = ?`, plan.ClaimID); err != nil {
+		return memory.DeletePlan{}, err
 	}
 	for _, taskID := range tasks {
 		if _, err := tx.ExecContext(ctx, `
@@ -993,26 +1226,90 @@ func (s *Store) CommitDeleteMemory(ctx context.Context, plan memory.DeletePlan) 
 				JOIN episodes e ON e.id = dc.episode_id
 				WHERE e.task_id = ?
 			) AND status <> 'invalidated'`, taskID); err != nil {
-			return err
+			return memory.DeletePlan{}, err
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE dataset_candidates SET status = 'invalidated'
 			WHERE episode_id IN (SELECT id FROM episodes WHERE task_id = ?) AND status <> 'invalidated'`, taskID); err != nil {
-			return err
+			return memory.DeletePlan{}, err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE episodes SET status = 'invalidated' WHERE task_id = ? AND status <> 'invalidated'`, taskID); err != nil {
-			return err
+			return memory.DeletePlan{}, err
 		}
 	}
 	for _, ref := range plan.ContentRefs {
 		if _, err := tx.ExecContext(ctx, `UPDATE content_objects SET deleted_at = ? WHERE object_id = ? AND version = ?`, formatTime(now), ref.ObjectID, ref.Version); err != nil {
-			return err
+			return memory.DeletePlan{}, err
 		}
 	}
 	if err := appendEvent(ctx, tx, "memory", plan.MemoryID, "memory.deleted", map[string]any{"affected": plan.Affected}, now); err != nil {
-		return err
+		return memory.DeletePlan{}, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return memory.DeletePlan{}, err
+	}
+	return plan, nil
+}
+
+type memoryToolResult struct {
+	IntentID string
+	Status   string
+	Ref      content.Ref
+}
+
+func memoryToolResultsForMemory(ctx context.Context, queryer memoryQueryer, memoryID string) ([]memoryToolResult, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT DISTINCT effects.id, effects.status, COALESCE(effects.result_ref_json, '')
+		FROM memory_retrieval_items items
+		JOIN effect_intents effects ON effects.id = items.retrieval_id
+		WHERE items.memory_id = ? AND effects.tool_id = 'builtin.memory'
+		ORDER BY effects.id`, memoryID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	results := make([]memoryToolResult, 0)
+	for rows.Next() {
+		var result memoryToolResult
+		var encodedRef string
+		if err := rows.Scan(&result.IntentID, &result.Status, &encodedRef); err != nil {
+			return nil, err
+		}
+		if encodedRef != "" {
+			if err := json.Unmarshal([]byte(encodedRef), &result.Ref); err != nil {
+				return nil, err
+			}
+		}
+		results = append(results, result)
+	}
+	return results, rows.Err()
+}
+
+func countMemoryToolResultRefs(results []memoryToolResult) int {
+	seen := make(map[string]struct{}, len(results))
+	for _, result := range results {
+		if result.Ref.ObjectID != "" {
+			seen[fmt.Sprintf("%s:%d", result.Ref.ObjectID, result.Ref.Version)] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+func uniqueContentRefs(refs []content.Ref) []content.Ref {
+	seen := make(map[string]struct{}, len(refs))
+	unique := make([]content.Ref, 0, len(refs))
+	for _, ref := range refs {
+		key := fmt.Sprintf("%s:%d", ref.ObjectID, ref.Version)
+		if ref.ObjectID == "" {
+			continue
+		}
+		if _, found := seen[key]; found {
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, ref)
+	}
+	return unique
 }
 
 type memoryQueryer interface {
@@ -1046,6 +1343,26 @@ func tasksReferencingMemory(ctx context.Context, queryer memoryQueryer, memoryID
 		}
 	}
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	retrievalRows, err := queryer.QueryContext(ctx, `
+		SELECT DISTINCT runs.task_id
+		FROM memory_retrieval_items items
+		JOIN memory_retrievals retrievals ON retrievals.id = items.retrieval_id
+		JOIN runs ON runs.id = retrievals.run_id
+		WHERE items.memory_id = ?`, memoryID)
+	if err != nil {
+		return nil, err
+	}
+	for retrievalRows.Next() {
+		var taskID string
+		if err := retrievalRows.Scan(&taskID); err != nil {
+			retrievalRows.Close()
+			return nil, err
+		}
+		tasks[taskID] = struct{}{}
+	}
+	if err := retrievalRows.Close(); err != nil {
 		return nil, err
 	}
 	result := make([]string, 0, len(tasks))
