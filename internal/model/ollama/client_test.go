@@ -1,10 +1,13 @@
 package ollama
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,9 +33,9 @@ func TestClientUsesNativeToolCalling(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := New(server.URL, "test-model", time.Second)
+	client := New(server.URL, "test-model", time.Second, nil, false)
 	response, err := client.Complete(context.Background(), agent.ModelRequest{
-		System: "stable soul", Messages: []agent.Message{{Role: "user", Content: "read it"}},
+		System: "stable soul", Messages: []agent.Message{{Role: "user", Content: "read it", SendTime: time.Date(2026, time.July, 22, 1, 2, 3, 0, time.UTC)}},
 		Tools:           []agent.ToolDefinition{{Name: "files", Description: "files", Parameters: map[string]any{"type": "object"}}},
 		MaxOutputTokens: 333,
 	})
@@ -41,6 +44,9 @@ func TestClientUsesNativeToolCalling(t *testing.T) {
 	}
 	if observed.Stream || observed.Think || len(observed.Tools) != 1 {
 		t.Fatalf("request did not use native non-streaming tools: %+v", observed)
+	}
+	if observed.Messages[1].Content != "<sent_at>2026-07-22T01:02:03Z</sent_at>\nread it" {
+		t.Fatalf("timestamped user content = %q", observed.Messages[1].Content)
 	}
 	if _, exists := observed.Options["format"]; exists {
 		t.Fatal("synthetic structured decision format must not be sent")
@@ -64,7 +70,7 @@ func TestClientPreservesAssistantCallAndMatchingToolResult(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"message": map[string]any{"role": "assistant", "content": "done"}, "done_reason": "stop"})
 	}))
 	defer server.Close()
-	client := New(server.URL, "test", time.Second)
+	client := New(server.URL, "test", time.Second, nil, false)
 	_, err := client.Complete(context.Background(), agent.ModelRequest{
 		System: "stable", Messages: []agent.Message{
 			{Role: "user", Content: "read"},
@@ -88,7 +94,7 @@ func TestClientRequestsNativeJSONOutputForStructuredEvaluation(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"message": map[string]any{"role": "assistant", "content": `{"result":"pass"}`}, "done_reason": "stop"})
 	}))
 	defer server.Close()
-	client := New(server.URL, "judge", time.Second)
+	client := New(server.URL, "judge", time.Second, nil, false)
 	if _, err := client.Complete(context.Background(), agent.ModelRequest{System: "return JSON", JSONOutput: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +110,7 @@ func TestClientForwardsVisionImagesInNativeOllamaMessage(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"message": map[string]any{"role": "assistant", "content": "image inspected"}, "done_reason": "stop"})
 	}))
 	defer server.Close()
-	client := New(server.URL, "vision", time.Second)
+	client := New(server.URL, "vision", time.Second, nil, false)
 	_, err := client.Complete(context.Background(), agent.ModelRequest{Messages: []agent.Message{{
 		Role: "user", Content: "inspect", Images: []agent.Image{{MediaType: "image/png", Data: "aW1hZ2U="}},
 	}}})
@@ -123,9 +129,28 @@ func TestClientDoesNotExposeProviderErrorBody(t *testing.T) {
 		w.Write([]byte("secret provider detail"))
 	}))
 	defer server.Close()
-	client := New(server.URL, "test-model", time.Second)
+	client := New(server.URL, "test-model", time.Second, nil, false)
 	_, err := client.Complete(context.Background(), agent.ModelRequest{System: "soul"})
 	if err == nil || err.Error() != "Ollama returned HTTP 500" {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestDebugLogWritesRawRequestAndResponseThroughUnifiedLogger(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"message":{"role":"assistant","content":"private local response"},"done_reason":"stop"}`))
+	}))
+	defer server.Close()
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	client := New(server.URL, "test-model", time.Second, logger, true)
+	if _, err := client.Complete(context.Background(), agent.ModelRequest{Messages: []agent.Message{{Role: "user", Content: "private local request"}}}); err != nil {
+		t.Fatal(err)
+	}
+	got := output.String()
+	for _, raw := range []string{"raw model provider request", "raw model provider response", "private local request", "private local response"} {
+		if !strings.Contains(got, raw) {
+			t.Fatalf("unified debug log is missing %q: %s", raw, got)
+		}
 	}
 }

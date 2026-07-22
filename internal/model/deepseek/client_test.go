@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,12 +39,12 @@ func TestClientUsesNativeToolsAndParsesCacheUsage(t *testing.T) {
 		})
 	}))
 	defer server.Close()
-	client, err := New(server.URL, "test-secret", "deepseek-v4-flash", time.Second)
+	client, err := New(server.URL, "test-secret", "deepseek-v4-flash", time.Second, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	response, err := client.Complete(context.Background(), agent.ModelRequest{
-		System: "stable soul", Messages: []agent.Message{{Role: "user", Content: "read it"}},
+		System: "stable soul", Messages: []agent.Message{{Role: "user", Content: "read it", SendTime: time.Date(2026, time.July, 22, 1, 2, 3, 0, time.UTC)}},
 		Tools:           []agent.ToolDefinition{{Name: "files", Description: "files", Parameters: map[string]any{"type": "object"}}},
 		MaxOutputTokens: 256,
 	})
@@ -52,6 +53,9 @@ func TestClientUsesNativeToolsAndParsesCacheUsage(t *testing.T) {
 	}
 	if observed.Thinking["type"] != "enabled" || observed.ReasoningEffort != "medium" || observed.ToolChoice != "" || observed.Temperature != nil || observed.MaxTokens != nil {
 		t.Fatalf("request = %+v", observed)
+	}
+	if observed.Messages[1].Content == nil || *observed.Messages[1].Content != "<sent_at>2026-07-22T01:02:03Z</sent_at>\nread it" {
+		t.Fatalf("timestamped user content = %v", observed.Messages[1].Content)
 	}
 	if response.Message.ReasoningContent != "I should read the requested file before answering." || len(response.Message.ToolCalls) != 1 || !json.Valid(response.Message.ToolCalls[0].Arguments) {
 		t.Fatalf("tool response = %+v", response.Message)
@@ -74,7 +78,7 @@ func TestClientUsesThinkingAndBoundedContentForStructuredEvaluation(t *testing.T
 		})
 	}))
 	defer server.Close()
-	client, _ := New(server.URL, "test-secret", "deepseek-v4-flash", time.Second)
+	client, _ := New(server.URL, "test-secret", "deepseek-v4-flash", time.Second, nil, false)
 	if _, err := client.Complete(context.Background(), agent.ModelRequest{
 		System: "judge carefully", JSONOutput: true, MaxOutputTokens: 128,
 	}); err != nil {
@@ -98,7 +102,7 @@ func TestClientReplaysReasoningContentForToolHistoryWithoutCurrentTools(t *testi
 		})
 	}))
 	defer server.Close()
-	client, _ := New(server.URL, "test-secret", "deepseek-v4-flash", time.Second)
+	client, _ := New(server.URL, "test-secret", "deepseek-v4-flash", time.Second, nil, false)
 	_, err := client.Complete(context.Background(), agent.ModelRequest{
 		System: "return JSON",
 		Messages: []agent.Message{
@@ -138,7 +142,7 @@ func TestClientRejectsThinkingToolCallWithoutReasoningContent(t *testing.T) {
 		})
 	}))
 	defer server.Close()
-	client, _ := New(server.URL, "test-secret", "deepseek-v4-flash", time.Second)
+	client, _ := New(server.URL, "test-secret", "deepseek-v4-flash", time.Second, nil, false)
 	_, err := client.Complete(context.Background(), agent.ModelRequest{
 		Messages: []agent.Message{{Role: "user", Content: "look it up"}},
 		Tools:    []agent.ToolDefinition{{Name: "lookup", Parameters: map[string]any{"type": "object"}}},
@@ -155,7 +159,7 @@ func TestClientRejectsToolHistoryWithoutReasoningBeforeDispatch(t *testing.T) {
 		requests++
 	}))
 	defer server.Close()
-	client, _ := New(server.URL, "test-secret", "deepseek-v4-flash", time.Second)
+	client, _ := New(server.URL, "test-secret", "deepseek-v4-flash", time.Second, nil, false)
 	_, err := client.Complete(context.Background(), agent.ModelRequest{Messages: []agent.Message{
 		{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1", Name: "lookup", Arguments: json.RawMessage(`{}`)}}},
 		{Role: "tool", ToolCallID: "call-1", Content: `{"found":true}`},
@@ -180,7 +184,7 @@ func TestClientRecoversTransientProviderFailure(t *testing.T) {
 		})
 	}))
 	defer server.Close()
-	client, _ := New(server.URL, "test-secret", "deepseek-v4-flash", 3*time.Second)
+	client, _ := New(server.URL, "test-secret", "deepseek-v4-flash", 3*time.Second, nil, false)
 	response, err := client.Complete(context.Background(), agent.ModelRequest{System: "stable"})
 	if err != nil {
 		t.Fatal(err)
@@ -208,7 +212,7 @@ func TestClientRequestPrefixRemainsByteStableAcrossToolTurn(t *testing.T) {
 		})
 	}))
 	defer server.Close()
-	client, _ := New(server.URL, "test-secret", "deepseek-v4-flash", time.Second)
+	client, _ := New(server.URL, "test-secret", "deepseek-v4-flash", time.Second, nil, false)
 	base := agent.ModelRequest{
 		System: "exact stable prefix", Messages: []agent.Message{{Role: "user", Content: "question"}},
 		Tools: []agent.ToolDefinition{{Name: "lookup", Description: "lookup", Parameters: map[string]any{"type": "object"}}},
@@ -246,7 +250,7 @@ func TestClientNeverExposesCredentialOrProviderBody(t *testing.T) {
 		w.Write([]byte("provider secret detail"))
 	}))
 	defer server.Close()
-	client, _ := New(server.URL, "credential-that-must-not-leak", "deepseek-v4-flash", time.Second)
+	client, _ := New(server.URL, "credential-that-must-not-leak", "deepseek-v4-flash", time.Second, nil, false)
 	_, err := client.Complete(context.Background(), agent.ModelRequest{System: "stable"})
 	if err == nil || strings.Contains(err.Error(), "credential-that-must-not-leak") || strings.Contains(err.Error(), "provider secret detail") {
 		t.Fatalf("unsafe error: %v", err)
@@ -256,26 +260,37 @@ func TestClientNeverExposesCredentialOrProviderBody(t *testing.T) {
 	}
 }
 
-func TestDebugRequestBodyPrintsCompleteUnredactedJSONOnlyWhenEnabled(t *testing.T) {
-	requestBody := []byte(`{"messages":[{"role":"user","content":"private debug text"}]}`)
+func TestDebugLogWritesRawRequestAndResponseThroughUnifiedLogger(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"private response text","reasoning_content":"private response reasoning"}}],"usage":{}}`))
+	}))
+	defer server.Close()
 	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
 
-	t.Setenv("ERI_DEBUG_DEEPSEEK_REQUEST_BODY", "")
-	debugRequestBody(&output, requestBody)
+	disabled, _ := New(server.URL, "test-secret", "deepseek-v4-flash", time.Second, logger, false)
+	if _, err := disabled.Complete(context.Background(), agent.ModelRequest{Messages: []agent.Message{{Role: "user", Content: "private request text"}}}); err != nil {
+		t.Fatal(err)
+	}
 	if output.Len() != 0 {
-		t.Fatalf("debug output without opt-in = %q", output.String())
+		t.Fatalf("raw log without opt-in = %q", output.String())
 	}
 
-	t.Setenv("ERI_DEBUG_DEEPSEEK_REQUEST_BODY", "1")
-	debugRequestBody(&output, requestBody)
-	if got := output.String(); !strings.Contains(got, string(requestBody)) || !strings.Contains(got, "private debug text") {
-		t.Fatalf("debug output did not preserve complete request body: %q", got)
+	enabled, _ := New(server.URL, "test-secret", "deepseek-v4-flash", time.Second, logger, true)
+	if _, err := enabled.Complete(context.Background(), agent.ModelRequest{Messages: []agent.Message{{Role: "user", Content: "private request text"}}}); err != nil {
+		t.Fatal(err)
+	}
+	got := output.String()
+	for _, raw := range []string{"raw model provider request", "raw model provider response", "private request text", "private response text", "private response reasoning"} {
+		if !strings.Contains(got, raw) {
+			t.Fatalf("unified debug log is missing %q: %s", raw, got)
+		}
 	}
 }
 
 func TestNewRequiresEnvironmentCredentialValue(t *testing.T) {
 	t.Parallel()
-	if _, err := New("https://api.deepseek.com", "", "deepseek-v4-flash", time.Second); err == nil {
+	if _, err := New("https://api.deepseek.com", "", "deepseek-v4-flash", time.Second, nil, false); err == nil {
 		t.Fatal("missing credential unexpectedly accepted")
 	}
 }
@@ -286,7 +301,7 @@ func TestNewRejectsInsecureOrCredentialBearingProviderURLs(t *testing.T) {
 		"https://user:secret@api.deepseek.com",
 		"https://api.deepseek.com?token=secret",
 	} {
-		if _, err := New(baseURL, "runtime-secret", "deepseek-v4-flash", time.Second); err == nil {
+		if _, err := New(baseURL, "runtime-secret", "deepseek-v4-flash", time.Second, nil, false); err == nil {
 			t.Fatalf("unsafe base URL %q accepted", baseURL)
 		}
 	}
@@ -303,7 +318,7 @@ func TestClientDoesNotForwardCredentialAcrossRedirectOrigins(t *testing.T) {
 		w.WriteHeader(http.StatusTemporaryRedirect)
 	}))
 	defer source.Close()
-	client, err := New(source.URL, "runtime-secret", "deepseek-v4-flash", time.Second)
+	client, err := New(source.URL, "runtime-secret", "deepseek-v4-flash", time.Second, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +342,7 @@ func TestLivePromptCacheProbe(t *testing.T) {
 	if model == "" {
 		model = "deepseek-v4-flash"
 	}
-	client, err := New("https://api.deepseek.com", key, model, 90*time.Second)
+	client, err := New("https://api.deepseek.com", key, model, 90*time.Second, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +384,7 @@ func TestLivePromptCacheAcrossReminderToolSurface(t *testing.T) {
 	if model == "" {
 		model = "deepseek-v4-flash"
 	}
-	client, err := New("https://api.deepseek.com", key, model, 90*time.Second)
+	client, err := New("https://api.deepseek.com", key, model, 90*time.Second, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +438,7 @@ func TestLiveThinkingToolReasoningReplay(t *testing.T) {
 	if model == "" {
 		model = "deepseek-v4-flash"
 	}
-	client, err := New("https://api.deepseek.com", key, model, 90*time.Second)
+	client, err := New("https://api.deepseek.com", key, model, 90*time.Second, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +472,6 @@ func TestLiveStructuredJudgeAfterThinkingToolTranscript(t *testing.T) {
 	if os.Getenv("ERI_DEEPSEEK_LIVE_TEST") != "1" {
 		t.Skip("set ERI_DEEPSEEK_LIVE_TEST=1 for the bounded structured Judge probe")
 	}
-	t.Setenv("ERI_DEBUG_DEEPSEEK_REQUEST_BODY", "")
 	key := strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
 	if key == "" {
 		t.Fatal("DEEPSEEK_API_KEY is required for the live structured Judge probe")
@@ -466,7 +480,7 @@ func TestLiveStructuredJudgeAfterThinkingToolTranscript(t *testing.T) {
 	if model == "" {
 		model = "deepseek-v4-flash"
 	}
-	client, err := New("https://api.deepseek.com", key, model, 90*time.Second)
+	client, err := New("https://api.deepseek.com", key, model, 90*time.Second, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}

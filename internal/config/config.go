@@ -56,6 +56,7 @@ type Config struct {
 	OllamaURL                string
 	DeepSeekURL              string
 	DeepSeekKeySet           bool
+	DebugLog                 bool
 	Model                    string
 	ModelTimeout             time.Duration
 	MaxEvalAttempts          int
@@ -141,6 +142,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	debugLog, err := boolEnv("ERI_DEBUG_LOG", false)
+	if err != nil {
+		return Config{}, err
+	}
 	approvalTTL, err := durationEnv("ERI_APPROVAL_TTL", 15*time.Minute, time.Minute, 24*time.Hour)
 	if err != nil {
 		return Config{}, err
@@ -163,6 +168,7 @@ func Load() (Config, error) {
 		OllamaURL:                strings.TrimRight(envOr("ERI_OLLAMA_URL", ollamaURLFallback), "/"),
 		DeepSeekURL:              strings.TrimRight(envOr("ERI_DEEPSEEK_URL", deepSeekURLFallback), "/"),
 		DeepSeekKeySet:           strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")) != "",
+		DebugLog:                 debugLog,
 		Model:                    envOr("ERI_MODEL", defaultModel),
 		ModelTimeout:             5 * time.Minute,
 		MaxEvalAttempts:          maxEvalAttempts,
@@ -381,6 +387,18 @@ func durationEnv(name string, fallback, minimum, maximum time.Duration) (time.Du
 	parsed, err := time.ParseDuration(value)
 	if err != nil || parsed < minimum || parsed > maximum {
 		return 0, fmt.Errorf("%s must be a duration between %s and %s", name, minimum, maximum)
+	}
+	return parsed, nil
+}
+
+func boolEnv(name string, fallback bool) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean", name)
 	}
 	return parsed, nil
 }

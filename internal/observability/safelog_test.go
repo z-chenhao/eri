@@ -2,6 +2,8 @@ package observability
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"os"
@@ -80,6 +82,33 @@ func TestProcessLoggerSanitizesArbitraryAttributeValues(t *testing.T) {
 	body, _ := os.ReadFile(path)
 	if strings.Contains(string(body), "private-map-value") || !strings.Contains(string(body), "[REDACTED]") {
 		t.Fatalf("arbitrary attribute was not sanitized: %s", body)
+	}
+}
+
+func TestRawModelDebugBodyIsTheOnlyUnredactedProcessLogValue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "daemon.log")
+	logger, closer, err := NewProcessLogger(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"messages":[{"content":"token=private-raw-value ` + strings.Repeat("x", 1500) + `"}]}`
+	logger.InfoContext(context.Background(), "raw model provider request",
+		"component", "model", "provider", "deepseek", "body", raw)
+	logger.Info("ordinary", "body", "token=ordinary-private-value")
+	_ = closer.Close()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logged := string(body)
+	var record struct {
+		Body string `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(strings.Split(logged, "\n")[0]), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Body != raw || strings.Contains(logged, "ordinary-private-value") || !strings.Contains(logged, "[REDACTED]") {
+		t.Fatalf("raw debug bypass or ordinary redaction failed: %s", logged)
 	}
 }
 

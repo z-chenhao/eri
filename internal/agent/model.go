@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/z-chenhao/eri/internal/execution"
@@ -21,9 +23,25 @@ type Message struct {
 	Role             string     `json:"role"`
 	Content          string     `json:"content,omitempty"`
 	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	SendTime         time.Time  `json:"send_time,omitzero"`
+	TemporalContext  bool       `json:"temporal_context,omitempty"`
 	Images           []Image    `json:"images,omitempty"`
 	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string     `json:"tool_call_id,omitempty"`
+}
+
+// TemporalContent returns the provider-visible body for a conversation
+// message. Runtime metadata remains outside the user's original content while
+// giving the primary Agent an exact, replay-stable time anchor.
+func (m Message) TemporalContent() string {
+	if (m.Role != "user" && m.Role != "assistant") || (!m.TemporalContext && m.SendTime.IsZero()) {
+		return m.Content
+	}
+	sentAt := "unknown"
+	if !m.SendTime.IsZero() {
+		sentAt = m.SendTime.UTC().Format(time.RFC3339Nano)
+	}
+	return "<sent_at>" + sentAt + "</sent_at>\n" + m.Content
 }
 
 type Image struct {
@@ -55,6 +73,18 @@ type ModelResponse struct {
 	Message      Message `json:"message"`
 	FinishReason string  `json:"finish_reason"`
 	Usage        Usage   `json:"usage"`
+}
+
+// LogRawModelExchange emits the provider-neutral diagnostic record understood
+// by Eri's unified process logger. Provider adapters call it only when Runtime
+// has enabled explicit raw debug mode.
+func LogRawModelExchange(ctx context.Context, logger *slog.Logger, provider, direction string, body []byte, attempt, status int) {
+	if logger == nil {
+		return
+	}
+	logger.InfoContext(ctx, "raw model provider "+direction,
+		"component", "model", "provider", provider, "direction", direction,
+		"attempt", attempt, "http_status", status, "body", string(body))
 }
 
 func snapshotModelRequest(request ModelRequest) ModelRequest {

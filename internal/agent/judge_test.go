@@ -2,10 +2,10 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 type judgeModelFunc func(context.Context, ModelRequest) (ModelResponse, error)
@@ -18,16 +18,17 @@ func (judgeModelFunc) Capabilities(context.Context) (ModelCapabilities, error) {
 	return testModelCapabilities(), nil
 }
 
-func decodeJudgeEnvelope(t *testing.T, request ModelRequest) judgeEnvelope {
+func judgeInput(t *testing.T, request ModelRequest) string {
 	t.Helper()
 	if len(request.Messages) != 1 || request.Messages[0].Role != "user" {
-		t.Fatalf("Judge messages = %+v, want one independent user evaluation envelope", request.Messages)
+		t.Fatalf("Judge messages = %+v, want one independent line-oriented user input", request.Messages)
 	}
-	var envelope judgeEnvelope
-	if err := json.Unmarshal([]byte(request.Messages[0].Content), &envelope); err != nil {
-		t.Fatalf("decode Judge envelope: %v", err)
+	for _, line := range strings.Split(request.Messages[0].Content, "\n") {
+		if !strings.HasPrefix(line, "-") || !strings.Contains(line, " [") || !strings.Contains(line, "]: ") {
+			t.Fatalf("Judge input line has the wrong shape: %q", line)
+		}
 	}
-	return envelope
+	return request.Messages[0].Content
 }
 
 func TestJudgeTreatsFocusedClarificationAsDeliverable(t *testing.T) {
@@ -58,6 +59,35 @@ func TestJudgeRequiresDurableReceiptsForExplicitFeedback(t *testing.T) {
 	}
 }
 
+func TestJudgeInputUsesOneTimestampedRecordPerLine(t *testing.T) {
+	sentAt := time.Date(2026, time.July, 22, 1, 2, 3, 0, time.UTC)
+	input, err := formatJudgeInput(JudgeRequest{
+		Messages: []Message{
+			{Role: "user", Content: "first line\nsecond line", SendTime: sentAt},
+			{Role: "assistant", Content: "candidate", SendTime: sentAt.Add(time.Second)},
+		},
+		TaskText: "review", Purpose: "final",
+	}, []string{"files"}, sentAt.Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(input, "\n")
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "-") || !strings.Contains(line, " [") || !strings.Contains(line, "]: ") {
+			t.Fatalf("invalid Judge input line: %q", line)
+		}
+	}
+	for _, expected := range []string{
+		`-user [2026-07-22T01:02:03Z]: first line\nsecond line`,
+		`-assistant [2026-07-22T01:02:04Z]: candidate`,
+		`-evaluation.confirmed_tools [2026-07-22T01:02:05Z]: files`,
+	} {
+		if !strings.Contains(input, expected) {
+			t.Fatalf("Judge input is missing %q: %s", expected, input)
+		}
+	}
+}
+
 func TestModelJudgeUsesTranscriptSkillsAndConfirmedTools(t *testing.T) {
 	model := judgeModelFunc(func(_ context.Context, request ModelRequest) (ModelResponse, error) {
 		if len(request.Tools) != 0 || !request.JSONOutput || !strings.Contains(request.System, "<eri_eval_judge>") {
@@ -66,12 +96,15 @@ func TestModelJudgeUsesTranscriptSkillsAndConfirmedTools(t *testing.T) {
 		if strings.Contains(request.System, "stable candidate context") || strings.Contains(request.System, "<agent_operating_rules>") {
 			t.Fatalf("judge inherited the wrong system role: %s", request.System)
 		}
-		envelope := decodeJudgeEnvelope(t, request)
-		if len(envelope.Transcript) != 2 || envelope.Transcript[len(envelope.Transcript)-1].Role != "assistant" || envelope.Transcript[len(envelope.Transcript)-1].Content != "choose A" ||
-			envelope.CandidateContext != "stable candidate context" || len(envelope.EvaluationContext.SelectedSkills) != 1 || envelope.EvaluationContext.SelectedSkills[0] != "research-decision@1.0.0" ||
-			len(envelope.EvaluationContext.ConfirmedTools) != 1 || envelope.EvaluationContext.ConfirmedTools[0] != "web" ||
-			len(envelope.EvaluationContext.MemoryClaimIDs) != 1 || envelope.EvaluationContext.MemoryClaimIDs[0] != "claim-preference" {
-			t.Fatalf("judge envelope=%+v system=%s", envelope, request.System)
+		input := judgeInput(t, request)
+		for _, expected := range []string{
+			"-user [unknown]: compare", "-assistant [unknown]: choose A",
+			"-evaluation.task [", "]: compare options", "]: research-decision@1.0.0",
+			"]: web", "]: claim-preference", "]: stable candidate context",
+		} {
+			if !strings.Contains(input, expected) {
+				t.Fatalf("Judge input is missing %q: %s", expected, input)
+			}
 		}
 		return ModelResponse{Message: Message{Role: "assistant", Content: `{"result":"repair","tier":"substantive","findings":["The recommendation is not grounded in the confirmed observation."],"applied_memory_claims":["claim-preference"]}`}, Usage: Usage{ModelCalls: 1}}, nil
 	})
@@ -153,9 +186,8 @@ func TestModelJudgeLetsTheModelRepairItsOwnInvalidProtocol(t *testing.T) {
 		if calls == 1 {
 			return ModelResponse{Message: Message{Role: "assistant", Content: `{"result":"pass","tier":"substance","findings":[]}`}, Usage: Usage{ModelCalls: 1}}, nil
 		}
-		envelope := decodeJudgeEnvelope(t, request)
-		last := envelope.Transcript[len(envelope.Transcript)-1]
-		if last.Role != "assistant" || last.Content != "candidate" || !request.JSONOutput || !strings.Contains(request.System, "<judge_protocol_repair>") ||
+		input := judgeInput(t, request)
+		if !strings.Contains(input, "-assistant [unknown]: candidate") || !request.JSONOutput || !strings.Contains(request.System, "<judge_protocol_repair>") ||
 			!strings.Contains(request.System, "required response protocol") || strings.Contains(request.System, "map substance to substantive") {
 			t.Fatalf("generic Judge repair request = %+v", request)
 		}
@@ -179,9 +211,9 @@ func TestModelJudgeRepairsEmptyStructuredOutputWithModifiedStructuredPrompt(t *t
 	}
 	judge, _ := NewModelJudge(judgeModelFunc(func(_ context.Context, request ModelRequest) (ModelResponse, error) {
 		calls++
-		envelope := decodeJudgeEnvelope(t, request)
-		if len(envelope.Transcript) != len(messages) || envelope.Transcript[1].ReasoningContent != "" || len(envelope.Transcript[1].ToolCalls) != 1 {
-			t.Fatalf("Judge evidence projection = %+v", envelope.Transcript)
+		input := judgeInput(t, request)
+		if strings.Contains(input, "the governed tool is required") || !strings.Contains(input, `tool_calls=[{"id":"call-1"`) {
+			t.Fatalf("Judge evidence projection = %s", input)
 		}
 		if calls == 1 {
 			if !request.JSONOutput {
@@ -194,14 +226,11 @@ func TestModelJudgeRepairsEmptyStructuredOutputWithModifiedStructuredPrompt(t *t
 		if !request.JSONOutput {
 			t.Fatal("empty native structured output must retain native JSON mode with thinking")
 		}
-		last := envelope.Transcript[len(envelope.Transcript)-1]
-		if last.Role != "assistant" || last.Content != "candidate" || request.Messages[0].Content != initialEnvelope || request.System == initialSystem || !strings.Contains(request.System, "<judge_protocol_repair>") || !strings.Contains(request.System, "empty response") {
+		if !strings.Contains(input, "-assistant [unknown]: candidate") || request.Messages[0].Content != initialEnvelope || request.System == initialSystem || !strings.Contains(request.System, "<judge_protocol_repair>") || !strings.Contains(request.System, "empty response") {
 			t.Fatalf("Judge retry did not modify only the System repair overlay: %+v", request)
 		}
-		for _, message := range envelope.Transcript {
-			if message.ReasoningContent == "private provider reasoning" {
-				t.Fatal("Judge retry reused provider-private reasoning from the rejected response")
-			}
+		if strings.Contains(input, "private provider reasoning") {
+			t.Fatal("Judge retry reused provider-private reasoning from the rejected response")
 		}
 		return ModelResponse{Message: Message{Role: "assistant", Content: `{"result":"pass","tier":"routine","findings":[]}`}, Usage: Usage{ModelCalls: 1}}, nil
 	}))
@@ -239,14 +268,14 @@ func TestModelJudgeProjectsTranscriptAsReasoningFreeEvaluationEvidence(t *testin
 		{Role: "assistant", Content: "candidate", ReasoningContent: "private candidate reasoning"},
 	}
 	judge, _ := NewModelJudge(judgeModelFunc(func(_ context.Context, request ModelRequest) (ModelResponse, error) {
-		envelope := decodeJudgeEnvelope(t, request)
-		for _, index := range []int{1, 3, 5} {
-			if got := envelope.Transcript[index].ReasoningContent; got != "" {
-				t.Fatalf("reasoning_content at message %d reached Judge: %q", index, got)
+		input := judgeInput(t, request)
+		for _, reasoning := range []string{"tool continuation state", "private intermediate reasoning", "private candidate reasoning"} {
+			if strings.Contains(input, reasoning) {
+				t.Fatalf("reasoning_content reached Judge: %q in %s", reasoning, input)
 			}
 		}
-		if len(envelope.Transcript[1].ToolCalls) != 1 || envelope.Transcript[2].ToolCallID != "call-1" {
-			t.Fatalf("Judge evidence lost Tool frame: %+v", envelope.Transcript)
+		if !strings.Contains(input, `tool_calls=[{"id":"call-1"`) || !strings.Contains(input, `tool_call_id="call-1"`) {
+			t.Fatalf("Judge evidence lost Tool frame: %s", input)
 		}
 		return ModelResponse{Message: Message{Role: "assistant", Content: `{"result":"pass","tier":"routine","findings":[],"applied_memory_claims":[]}`}}, nil
 	}))

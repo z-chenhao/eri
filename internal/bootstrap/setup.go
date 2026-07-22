@@ -210,7 +210,7 @@ func configureOllama(ctx context.Context, cfg config.Config, models []ollamaMode
 		return config.ModelProfile{}, err
 	}
 	fmt.Fprintf(output, "Validating the context window and native tool calling for %s…\n", selection.Name)
-	capabilities, err := ollama.New(cfg.OllamaURL, selection.Name, 30*time.Second).Capabilities(ctx)
+	capabilities, err := ollama.New(cfg.OllamaURL, selection.Name, 30*time.Second, nil, false).Capabilities(ctx)
 	if err != nil {
 		return config.ModelProfile{}, fmt.Errorf("inspect selected Ollama model: %w", err)
 	}

@@ -146,7 +146,7 @@ Fixed rules:
 - Memory details distinguish `stored`, `retrieved`, `injected`, `applied`, `sent_to_external_model`, and `written`. One state can never be inferred from another without Runtime evidence.
 - Conversation exposes only a user-safe Run projection. Raw Events, full Context Manifest, ungoverned Tool Results, complete Effect/Eval/Delivery internals, Episodes, datasets, and evolution controls remain in Observatory.
 - No UI stores or displays private Chain of Thought, full prompts, or ungoverned Tool Results.
-- When a selected model requires hidden continuation state such as `reasoning_content` for native Tool Calling, Eri keeps it encrypted with the provider-native assistant Tool Call and matching Tool Results. The active checkpoint and encrypted terminal Run transcript allow the next Run in the same canonical Conversation to continue that exact protocol history while it remains relevant. Compaction may summarize or remove only closed Tool frames; it never splits a call from its result. Conversation and Observatory expose only a safe projection. Private continuation state never becomes a user Message, Memory, Episode, dataset, evolution input, log field, or observable Run detail.
+- When a selected model requires hidden continuation state such as `reasoning_content` for native Tool Calling, Eri keeps it encrypted with the provider-native assistant Tool Call and matching Tool Results. The active checkpoint and encrypted terminal Run transcript allow the next Run in the same canonical Conversation to continue that exact protocol history while it remains relevant. Compaction may summarize or remove only closed Tool frames; it never splits a call from its result. Conversation and Observatory expose only a safe projection. Private continuation state never becomes a user Message, Memory, Episode, dataset, evolution input, or observable Run detail. It appears in a process log only when the user explicitly starts local developer diagnosis with `ERI_DEBUG_LOG=1`; that entire bounded log is then sensitive and non-shareable.
 
 ### 4.3 Conversation behavior
 
@@ -358,7 +358,7 @@ Before OS sandboxing exists, installed Plugins are explicitly trusted local code
 
 - Observe only data explicitly supplied or connected; never monitor all screens, keystrokes, files, or traffic by default.
 - Non-secret profile data may be encrypted locally.
-- Passwords, OAuth tokens, cookies, session grants, and API secrets never enter persistent Core data, model Context, Memory, logs, Episodes, or datasets.
+- Passwords, OAuth tokens, cookies, session grants, and API secrets never enter persistent Core data, model Context, Memory, ordinary logs, Episodes, or datasets. `ERI_DEBUG_LOG=1` never records authorization headers, but any such value already present in a provider body is intentionally reproduced in the sensitive local debug log.
 - Long-lived Provider credentials explicitly accepted by the user may exist only in an out-of-process Broker's OS Keychain.
 - Use already authenticated browser/OS surfaces or temporary broker capabilities.
 - Google refresh grants live only in `eri-google-auth-broker` Keychain storage. Core gets a one-time Task/Run/Invocation/Scope-bound handle; the Plugin redeems only a short token through a separate socket.
@@ -435,7 +435,7 @@ Default detail answers what Eri is doing, where it stopped, why it failed, and c
 
 Allow cancel, retry from a safe checkpoint, re-run Eval, export Episode, and fault handling. Never edit the database, forge Task state, edit live memory, or bypass Policy/Eval. Every operation emits an audit Event.
 
-CLI diagnosis complements Observatory: `eri logs` reads the same redacted rotating daemon log used during foreground execution, and `eri diagnose` creates a bounded review-before-sharing archive of safe configuration, doctor output, and redacted process logs. It excludes Conversation content, prompts, raw Tool Results, databases, encrypted Content, and credentials.
+CLI diagnosis complements Observatory: `eri logs` reads the same rotating daemon log used during foreground execution. It is redacted by default. Explicit local developer mode `ERI_DEBUG_LOG=1` adds complete provider request and response bodies, including private prompts, Messages, Tool data, and continuation state; the resulting log must be treated as sensitive and must not be shared. `eri diagnose` creates a bounded review-before-sharing archive of safe configuration, doctor output, and only redacted process-log fields; it excludes raw debug provider bodies, Conversation content, prompts, raw Tool Results, databases, encrypted Content, and credentials.
 
 ## 18. MVP scope
 

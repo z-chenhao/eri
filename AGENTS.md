@@ -26,6 +26,11 @@ Read only the task-relevant sections before working. The product document explai
 5. Deliver the smallest real end-to-end slice. Do not pre-create a future package tree or placeholder abstractions.
 6. Run relevant checks, inspect the complete diff, and report evidence.
 
+### Minimal change and no overdesign
+
+- Make the smallest cohesive change that fully satisfies the confirmed requirement. Preserve existing contracts and do not mix opportunistic cleanup, unrelated refactors, or speculative generalization into the task.
+- Do not add abstractions, packages, configuration, compatibility layers, extension points, or state for hypothetical future needs. Reuse the current owner and data flow; introduce a new boundary only when the present end-to-end behavior requires it and tests can prove it.
+
 For Agent behavior, first make Context Assembly carry the smallest authoritative context that is sufficient for the decision. Keep the stable Prompt short, general, and explicit about durable capabilities and evidence boundaries. Do not accumulate transcript-specific `case` branches, keyword rules, or examples when one causal invariant, context boundary, or plain instruction solves the class. Prefer the simplest complete design: fewer states, less context, and less latency are part of correctness.
 
 AI-native development does not remove requirements, design constraints, or verification. High autonomy must remain reviewable.
@@ -60,11 +65,11 @@ README embeds [`docs/assets/eri-architecture-handdrawn.svg`](docs/assets/eri-arc
 ## Safety and data invariants
 
 - Strict local-first: external services receive only the minimum task data.
-- Never persist passwords, tokens, cookies, API secrets, or session grants, and never place them in logs, Memory, Episodes, or datasets.
+- Never persist passwords, tokens, cookies, API secrets, or session grants, and never place them in Memory, Episodes, datasets, or ordinary logs. Explicit local `ERI_DEBUG_LOG=1` may reproduce values already present in provider bodies; it never records authorization headers and makes the whole process log sensitive.
 - A Model may return candidate text or request native Tool Calls. It cannot grant authority, write databases directly, or bypass Policy.
 - Persist an intent and idempotency key before any external side effect. Dangerous actions require strong approval.
 - Every outward delivery passes Eval and is sent and reconciled through the Outbox.
-- Preserve provider-required continuation state such as `reasoning_content` with its assistant Message inside encrypted Agent checkpoints for exact replay and inside the encrypted user-owned Run record for retention, export, and deletion. Safe Trace projections must omit it; never promote it into Delivery, logs, Observatory, Memory, Episodes, datasets, or evolution.
+- Preserve provider-required continuation state such as `reasoning_content` with its assistant Message inside encrypted Agent checkpoints for exact replay and inside the encrypted user-owned Run record for retention, export, and deletion. Safe Trace projections must omit it; never promote it into Delivery, Observatory, Memory, Episodes, datasets, or evolution. The sole log exception is explicit local developer mode `ERI_DEBUG_LOG=1`, which records raw provider request and response bodies in the bounded process log for diagnosis and must never be enabled in shareable or production-like runs.
 - Memory, Eval, Episode, evolution, and observability changes must preserve source, version, deletion lineage, and privacy boundaries.
 
 ## Engineering
@@ -74,7 +79,7 @@ README embeds [`docs/assets/eri-architecture-handdrawn.svg`](docs/assets/eri-arc
 - Eri-owned code and documentation use Apache-2.0. Preserve the source and license of third-party code, models, data, and assets.
 - Fix root causes. Avoid compatibility shims, silent fallbacks, and false success.
 - Test behavior near its owner: unit tests for domains, integration tests across boundaries, and reproducible eval fixtures for critical Agent Loop behavior.
-- Redact logs and errors. Fixtures must not contain real credentials or personal data.
+- Redact logs and errors by default. Explicit `ERI_DEBUG_LOG=1` provider diagnostics are intentionally raw and local-only; fixtures must not contain real credentials or personal data.
 - Repository-owned source, documentation, tests, and UI copy are English. Eri's runtime output follows the user's language.
 
 Stable commands:

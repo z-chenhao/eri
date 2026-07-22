@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -22,15 +23,17 @@ type Client struct {
 	http    *http.Client
 	capMu   sync.Mutex
 	caps    *agent.ModelCapabilities
+	logger  *slog.Logger
+	debug   bool
 }
 
-func New(baseURL, model string, timeout time.Duration) *Client {
+func New(baseURL, model string, timeout time.Duration, logger *slog.Logger, debug bool) *Client {
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
 	}
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"), model: model,
-		http: &http.Client{Timeout: timeout},
+		http: &http.Client{Timeout: timeout}, logger: logger, debug: debug,
 	}
 }
 
@@ -149,7 +152,7 @@ func (c *Client) Complete(ctx context.Context, input agent.ModelRequest) (agent.
 	messages = append(messages, chatMessage{Role: "system", Content: input.System})
 	toolNames := make(map[string]string)
 	for _, message := range input.Messages {
-		native := chatMessage{Role: message.Role, Content: message.Content, ToolCallID: message.ToolCallID}
+		native := chatMessage{Role: message.Role, Content: message.TemporalContent(), ToolCallID: message.ToolCallID}
 		for _, image := range message.Images {
 			native.Images = append(native.Images, image.Data)
 		}
@@ -189,6 +192,7 @@ func (c *Client) Complete(ctx context.Context, input agent.ModelRequest) (agent.
 	if err != nil {
 		return agent.ModelResponse{}, fmt.Errorf("encode Ollama request: %w", err)
 	}
+	c.logRaw(ctx, "request", encoded, 1, 0)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/chat", bytes.NewReader(encoded))
 	if err != nil {
 		return agent.ModelResponse{}, fmt.Errorf("create Ollama request: %w", err)
@@ -200,12 +204,23 @@ func (c *Client) Complete(ctx context.Context, input agent.ModelRequest) (agent.
 		return agent.ModelResponse{}, fmt.Errorf("call Ollama: %w", err)
 	}
 	defer resp.Body.Close()
+	var responseBody []byte
+	if c.debug {
+		responseBody, err = io.ReadAll(resp.Body)
+	} else if resp.StatusCode == http.StatusOK {
+		responseBody, err = io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	} else {
+		_, err = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
+	}
+	if err != nil {
+		return agent.ModelResponse{}, fmt.Errorf("read Ollama response: %w", err)
+	}
+	c.logRaw(ctx, "response", responseBody, 1, resp.StatusCode)
 	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
 		return agent.ModelResponse{}, fmt.Errorf("Ollama returned HTTP %d", resp.StatusCode)
 	}
 	var response chatResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 2*1024*1024)).Decode(&response); err != nil {
+	if err := json.Unmarshal(responseBody, &response); err != nil {
 		return agent.ModelResponse{}, fmt.Errorf("decode Ollama response: %w", err)
 	}
 	message := agent.Message{Role: "assistant", Content: response.Message.Content}
@@ -225,4 +240,11 @@ func (c *Client) Complete(ctx context.Context, input agent.ModelRequest) (agent.
 			OutputTokens: response.EvalCount, ModelCalls: 1, DurationMillis: duration,
 		},
 	}, nil
+}
+
+func (c *Client) logRaw(ctx context.Context, direction string, body []byte, attempt, status int) {
+	if !c.debug || c.logger == nil {
+		return
+	}
+	agent.LogRawModelExchange(ctx, c.logger, "ollama", direction, body, attempt, status)
 }

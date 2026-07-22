@@ -8,10 +8,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -24,29 +24,31 @@ type Client struct {
 	apiKey  string
 	model   string
 	http    *http.Client
+	logger  *slog.Logger
+	debug   bool
 }
 
-func New(baseURL, apiKey, model string, timeout time.Duration) (*Client, error) {
+func New(baseURL, apiKey, model string, timeout time.Duration, logger *slog.Logger, debug bool) (*Client, error) {
 	if strings.TrimSpace(apiKey) == "" {
 		return nil, fmt.Errorf("DEEPSEEK_API_KEY is required when ERI_MODEL_PROVIDER=deepseek")
 	}
-	return newClient(baseURL, apiKey, model, timeout, nil)
+	return newClient(baseURL, apiKey, model, timeout, nil, logger, debug)
 }
 
 // NewViaBroker keeps the DeepSeek credential outside Eri Core. The custom
 // transport reaches the isolated Provider Secret Broker over a private socket;
 // the Broker attaches the Authorization header immediately before egress.
-func NewViaBroker(socketPath, model string, timeout time.Duration) (*Client, error) {
+func NewViaBroker(socketPath, model string, timeout time.Duration, logger *slog.Logger, debug bool) (*Client, error) {
 	if !filepath.IsAbs(socketPath) || filepath.Clean(socketPath) == string(filepath.Separator) {
 		return nil, fmt.Errorf("provider broker socket must be an absolute non-root path")
 	}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, "unix", socketPath)
 	}}
-	return newClient("http://127.0.0.1", "", model, timeout, transport)
+	return newClient("http://127.0.0.1", "", model, timeout, transport, logger, debug)
 }
 
-func newClient(baseURL, apiKey, model string, timeout time.Duration, transport http.RoundTripper) (*Client, error) {
+func newClient(baseURL, apiKey, model string, timeout time.Duration, transport http.RoundTripper, logger *slog.Logger, debug bool) (*Client, error) {
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
 	}
@@ -67,7 +69,7 @@ func newClient(baseURL, apiKey, model string, timeout time.Duration, transport h
 	}
 	return &Client{
 		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"), apiKey: apiKey, model: model,
-		http: client,
+		http: client, logger: logger, debug: debug,
 	}, nil
 }
 
@@ -156,7 +158,7 @@ func (c *Client) Complete(ctx context.Context, input agent.ModelRequest) (agent.
 		if len(message.ToolCalls) > 0 && strings.TrimSpace(message.ReasoningContent) == "" {
 			return agent.ModelResponse{}, fmt.Errorf("DeepSeek thinking transcript message %d has Tool Calls without reasoning_content", index)
 		}
-		content := message.Content
+		content := message.TemporalContent()
 		// DeepSeek's thinking Tool examples replay assistant Tool Calls with
 		// content="". Keep that non-null protocol value while replaying the
 		// provider-native reasoning_content and Tool Calls unchanged.
@@ -208,7 +210,6 @@ func (c *Client) Complete(ctx context.Context, input agent.ModelRequest) (agent.
 	if err != nil {
 		return agent.ModelResponse{}, fmt.Errorf("encode DeepSeek request: %w", err)
 	}
-	debugRequestBody(os.Stderr, encoded)
 	started := time.Now()
 	response, err := c.completeWithRecovery(ctx, encoded)
 	if err != nil {
@@ -244,13 +245,11 @@ func (c *Client) Complete(ctx context.Context, input agent.ModelRequest) (agent.
 	}, nil
 }
 
-func debugRequestBody(writer io.Writer, encoded []byte) {
-	if os.Getenv("ERI_DEBUG_DEEPSEEK_REQUEST_BODY") != "1" {
+func (c *Client) logRaw(ctx context.Context, direction string, body []byte, attempt, status int) {
+	if !c.debug || c.logger == nil {
 		return
 	}
-	// Developer-only explicit opt-in: encoded may contain the complete private
-	// conversation, Memory, Tool arguments, and provider continuation state.
-	fmt.Fprintf(writer, "DeepSeek requestBody: %s\n", encoded)
+	agent.LogRawModelExchange(ctx, c.logger, "deepseek", direction, body, attempt, status)
 }
 
 const deepSeekAttempts = 3
@@ -265,6 +264,7 @@ func (c *Client) completeWithRecovery(ctx context.Context, encoded []byte) (chat
 			req.Header.Set("Authorization", "Bearer "+c.apiKey)
 		}
 		req.Header.Set("Content-Type", "application/json")
+		c.logRaw(ctx, "request", encoded, attempt, 0)
 		resp, err := c.http.Do(req)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -278,9 +278,20 @@ func (c *Client) completeWithRecovery(ctx context.Context, encoded []byte) (chat
 			}
 			continue
 		}
+		var responseBody []byte
+		if c.debug {
+			responseBody, err = io.ReadAll(resp.Body)
+		} else if resp.StatusCode == http.StatusOK {
+			responseBody, err = io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+		} else {
+			_, err = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
+		}
+		resp.Body.Close()
+		if err != nil {
+			return chatResponse{}, fmt.Errorf("read DeepSeek response: %w", err)
+		}
+		c.logRaw(ctx, "response", responseBody, attempt, resp.StatusCode)
 		if resp.StatusCode != http.StatusOK {
-			io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
-			resp.Body.Close()
 			if retryableStatus(resp.StatusCode) && attempt < deepSeekAttempts {
 				if err := waitForRetry(ctx, attempt); err != nil {
 					return chatResponse{}, err
@@ -290,9 +301,7 @@ func (c *Client) completeWithRecovery(ctx context.Context, encoded []byte) (chat
 			return chatResponse{}, fmt.Errorf("DeepSeek returned HTTP %d", resp.StatusCode)
 		}
 		var response chatResponse
-		err = json.NewDecoder(io.LimitReader(resp.Body, 2*1024*1024)).Decode(&response)
-		resp.Body.Close()
-		if err != nil {
+		if err := json.Unmarshal(responseBody, &response); err != nil {
 			return chatResponse{}, fmt.Errorf("decode DeepSeek response: %w", err)
 		}
 		return response, nil

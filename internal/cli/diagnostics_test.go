@@ -36,7 +36,9 @@ func TestDiagnoseCreatesReviewableRedactedArchive(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "logs"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "logs", "daemon.log"), []byte("task failed token=private-diagnostic-value\n"), 0o600); err != nil {
+	logBody := `{"msg":"task failed","error":"token=private-diagnostic-value"}` + "\n" +
+		`{"msg":"raw model provider response","body":"private-raw-provider-body"}` + "\n"
+	if err := os.WriteFile(filepath.Join(root, "logs", "daemon.log"), []byte(logBody), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	output := filepath.Join(root, "bundle.zip")
@@ -71,7 +73,7 @@ func TestDiagnoseCreatesReviewableRedactedArchive(t *testing.T) {
 			t.Fatalf("diagnostic archive is missing %s: %v", required, entries)
 		}
 	}
-	if strings.Contains(entries["logs/daemon.log"], "private-diagnostic-value") || !strings.Contains(entries["logs/daemon.log"], "[REDACTED]") {
+	if strings.Contains(entries["logs/daemon.log"], "private-diagnostic-value") || strings.Contains(entries["logs/daemon.log"], "private-raw-provider-body") || !strings.Contains(entries["logs/daemon.log"], "[REDACTED]") {
 		t.Fatalf("diagnostic log was not redacted: %s", entries["logs/daemon.log"])
 	}
 	if !strings.Contains(entries["configuration.json"], `"lark_enabled": true`) || !strings.Contains(entries["configuration.json"], `"lark_brand": "feishu"`) {
@@ -79,6 +81,9 @@ func TestDiagnoseCreatesReviewableRedactedArchive(t *testing.T) {
 	}
 	if !strings.Contains(entries["configuration.json"], `"web_enabled": true`) || !strings.Contains(entries["configuration.json"], `"web_provider": "tavily"`) {
 		t.Fatalf("diagnostic configuration is missing safe Web state: %s", entries["configuration.json"])
+	}
+	if !strings.Contains(entries["configuration.json"], `"raw_model_debug": false`) {
+		t.Fatalf("diagnostic configuration is missing raw debug state: %s", entries["configuration.json"])
 	}
 	for _, sensitive := range []string{"cli_private", "ou_private", "app_secret"} {
 		if strings.Contains(entries["configuration.json"], sensitive) {

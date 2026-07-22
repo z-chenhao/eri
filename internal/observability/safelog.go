@@ -32,7 +32,8 @@ func SafeError(err error) string {
 }
 
 // SafeText is intended only for operational metadata. User messages, prompts
-// and tool results must not be passed to it or written to logs at all.
+// and tool results must not be passed to it. Explicit local raw model debug
+// records use the dedicated provider-neutral attribute recognized below.
 func SafeText(value string, limit int) string {
 	value = strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\r' || r == '\t' {
@@ -103,8 +104,14 @@ func (h safeHandler) Enabled(ctx context.Context, level slog.Level) bool {
 
 func (h safeHandler) Handle(ctx context.Context, record slog.Record) error {
 	safe := slog.NewRecord(record.Time, record.Level, SafeText(record.Message, 500), record.PC)
+	rawModelDebug := strings.HasPrefix(record.Message, "raw model provider ")
 	record.Attrs(func(attribute slog.Attr) bool {
-		safe.AddAttrs(safeAttribute(attribute))
+		attribute.Value = attribute.Value.Resolve()
+		if rawModelDebug && attribute.Key == "body" && attribute.Value.Kind() == slog.KindString {
+			safe.AddAttrs(attribute)
+		} else {
+			safe.AddAttrs(safeAttribute(attribute))
+		}
 		return true
 	})
 	return h.next.Handle(ctx, safe)

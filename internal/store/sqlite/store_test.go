@@ -508,6 +508,29 @@ func TestListMessagesForTaskDoesNotDependOnGlobalPagination(t *testing.T) {
 	}
 }
 
+func TestClaimTaskUsesAuthoritativeExternalMessageTime(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "message-time.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	sentAt := time.Date(2026, time.July, 22, 1, 2, 3, 456000000, time.UTC)
+	inbound, _, err := store.CreateExternalInbound(ctx, "lark", channel.ExternalInteraction{
+		MessageID: "om_time", ConversationID: "oc_time", SenderID: "ou_time", CreatedAt: sentAt,
+	}, testRef("time-message", "time-hash"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := store.ClaimTask(ctx, inbound.TaskID, "worker", time.Minute, "soul", `{}`, "test:model")
+	if err != nil || !ok || len(claimed.Messages) != 1 {
+		t.Fatalf("claimed=%+v ok=%t err=%v", claimed, ok, err)
+	}
+	if !claimed.Messages[0].SendTime.Equal(sentAt) {
+		t.Fatalf("message send time = %s, want %s", claimed.Messages[0].SendTime, sentAt)
+	}
+}
+
 func TestContextCheckpointReplacesOnlyOlderConversationHistory(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(filepath.Join(t.TempDir(), "eri.db"))
